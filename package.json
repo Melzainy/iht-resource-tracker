@@ -1,0 +1,26 @@
+{
+  "name": "iht-resource-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Immersive Homes Resource Tracker (standalone / temporary): shared live resource planner on Supabase.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "scripts": {
+    "dev": "node scripts/build.mjs --serve",
+    "build": "node scripts/build.mjs",
+    "preview": "node scripts/build.mjs --preview",
+    "check": "node scripts/rt-check.mjs",
+    "seed:sql": "node scripts/rt-seed-sql.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.117.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
+}

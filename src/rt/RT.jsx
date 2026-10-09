@@ -11,8 +11,9 @@ import { RT_CONFIG, keyProblem } from './config.js';
 import { createClient } from '@supabase/supabase-js';
 import seed from './seed.json';
 import { PM_PHASES, phaseLabel } from './pm-phases.js';
+import { createPortal } from 'react-dom';
 
-const { useState, useEffect, useMemo, useRef } = React;
+const { useState, useEffect, useLayoutEffect, useMemo, useRef } = React;
 let STORE = null;
 let CONFIG_ERROR = null;
 function getStore() {
@@ -317,8 +318,17 @@ function DatePick({ value, onPick, label, className = '', children }) {
   const [bad, setBad] = useState(false);
   const [pos, setPos] = useState(null);
   const btn = useRef(null); const pop = useRef(null);
-  const place = () => { const r = btn.current?.getBoundingClientRect(); if (!r) return; const h = 292; const w = 232; let top = r.bottom + 3; if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 3); setPos({ top, left: Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) }); };
+  // The calendar is portalled to <body> and placed from the field's screen position, so the
+  // Planner/Gantt scroll containers and sticky layers can never clip or cover it.
+  const place = () => {
+    const r = btn.current?.getBoundingClientRect(); if (!r) return;
+    const h = pop.current?.offsetHeight || 292; const w = pop.current?.offsetWidth || 232; const vh = window.innerHeight; const vw = window.innerWidth;
+    let top = r.bottom + 3; if (top + h > vh - 8 && r.top - h - 3 >= 8) top = r.top - h - 3; else if (top + h > vh - 8) top = Math.max(8, vh - h - 8);
+    const p = { top: Math.round(top), left: Math.round(Math.max(8, Math.min(r.left, vw - w - 8))) };
+    setPos((o) => (o && o.top === p.top && o.left === p.left ? o : p));
+  };
   const show = () => { const base = value || todayISO(); setView(base.slice(0, 7)); setTyped(''); setBad(false); place(); setOpen(true); };
+  useLayoutEffect(() => { if (open) place(); }, [open, view]);
   useEffect(() => {
     if (!open) return undefined;
     const out = (e) => { if (!pop.current?.contains(e.target) && !btn.current?.contains(e.target)) setOpen(false); };
@@ -336,7 +346,7 @@ function DatePick({ value, onPick, label, className = '', children }) {
   return <>
     <button type="button" ref={btn} className={`rt-in rt-dbtn ${className} ${open ? 'open' : ''}`} aria-label={label} aria-haspopup="dialog" aria-expanded={open} title={label} onClick={() => (open ? setOpen(false) : show())}
       onKeyDown={(e) => { if (e.key === 'ArrowDown' && !open) { e.preventDefault(); show(); } }}>{children}</button>
-    {open && pos && <div ref={pop} className="rt-cal" role="dialog" aria-label={`${label} — choose a date`} style={{ top: pos.top, left: pos.left }}>
+    {open && pos && createPortal(<div ref={pop} className="rt-cal" role="dialog" aria-label={`${label} — choose a date`} style={{ top: pos.top, left: pos.left }}>
       <div className="rt-cal-h"><button type="button" aria-label="Previous month" onClick={() => shift(-1)}>‹</button><b>{MONTHS[vm - 1]} {vy}</b><button type="button" aria-label="Next month" onClick={() => shift(1)}>›</button></div>
       <div className="rt-cal-g" role="grid">{['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].map((d) => <span key={d} className="dow">{d}</span>)}
         {cells.map((d) => <button type="button" key={d} role="gridcell" aria-label={M.fmtD(d, true)} aria-selected={d === value} className={`${d.slice(0, 7) === vw ? '' : 'out'} ${d === value ? 'sel' : ''} ${d === today ? 'tod' : ''}`} onClick={() => choose(d)}>{+d.slice(8)}</button>)}</div>
@@ -346,7 +356,7 @@ function DatePick({ value, onPick, label, className = '', children }) {
         <button type="button" onClick={() => choose(today)}>Today</button>
         <button type="button" className="clr" onClick={() => choose(null)} disabled={!value}>Clear</button>
       </div>
-    </div>}
+    </div>, document.body)}
   </>;
 }
 

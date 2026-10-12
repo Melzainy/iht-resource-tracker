@@ -48,6 +48,8 @@ export function createStore(adapter) {
     get saving() { return saving > 0; },
     get savedAt() { return savedAt; },
     get connection() { return conn; },
+    // rt_projects.phase_key exists (Supabase returns every column) — or the local preview, which stores anything.
+    get supportsProjectPhase() { return !!db && (adapter.name === 'local' || db.rt_projects.some((p) => Object.prototype.hasOwnProperty.call(p, 'phase_key'))); },
     async init() {
       db = await adapter.load();
       adapter.subscribe((op) => { if (op.kind === 'reset') { reload(); return; } incoming(op); }, (st) => { conn = st; emit(); });
@@ -88,6 +90,14 @@ export function createStore(adapter) {
       const s = clean(input.start_date); const f = clean(input.target_finish);
       if (s && f && f < s) return fail('Target finish is before the start.');
       const row = { ...(prev || { id: newId(), created_at: now(), active: true }), name, status: clean(input.status), project_manager: clean(input.project_manager), start_date: s, target_finish: f, notes: clean(input.notes), updated_at: now() };
+      // Current project phase (permanent PM phase id). Only sent when the database has the
+      // rt_projects.phase_key column (supabase/migrations/2026-10-12_rt_projects_phase_key.sql).
+      if ('phase_key' in input) {
+        const ph = clean(input.phase_key);
+        if (ph && !phaseByKey[ph]) return fail('Unknown phase.');
+        if (!api.supportsProjectPhase) { if (ph !== (prev?.phase_key ?? null)) return fail('Project phase needs the database update (rt_projects.phase_key) first.'); }
+        else row.phase_key = ph;
+      }
       commit([{ table: 'rt_projects', kind: 'upsert', row }]);
       return ok({ row });
     },

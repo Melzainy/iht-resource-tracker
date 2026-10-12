@@ -58,3 +58,15 @@ A small company planning tool inside the prototype website. It is **not** part o
   - When the overlapping tasks have no hours, the person shows "capacity cannot be fully evaluated" rather than an invented figure.
   - Needs Attention includes tasks running alongside 2 or more others.
 - Supabase draft schema: added `rt_tasks.phase_key text` (nullable).
+
+## Revision 5 — V1 redesign (branch `redesign/resource-tracker-v2`)
+
+- **Visual and UX** follow the approved prototype (`ih-resource-tracker-prototype.html`): Gantari type, olive palette, light / dark mode with a switch (saved per browser; first visit follows the system), responsive down to phone width. The prototype banner (sample data / Example hours / Reset) is not in production; live save / connection status is a small indicator in the top bar, and save errors still show prominently.
+- **Data is unchanged.** Every screen reads the one store (`src/rt/store.js`) and saves through its validated actions → Supabase adapter → Realtime. The prototype's localStorage datastore was not copied; only view preferences (theme, chosen name, view, Gantt range) live in the browser. UUID relationships, null-for-missing, permanent `phase_key` ids, overdue / blocked rules, archive and deactivate behaviour are the existing ones.
+- **Navigation:** Overview · Planner · Settings, plus My tasks. The Timeline, Projects and Team screens are folded into Overview, Planner and Settings. Capacity / over-capacity / overlap analysis is not shown in V1 (`model.js` keeps it for later).
+- **Planner:** KPI strip (Active · Overdue · Blocked · Due this week, click to filter), discipline chips, All / Attention, search, Filters panel, 4 / 8 / 12 weeks, Details (all fields), Expand / Collapse all, "Add task for…". People start collapsed. Summary rows draw every task in its status colour with overdue boxes and a ⚠ label. Gantt drag saves through `store.saveTask`; a due-only task stays due-only (Start is never invented). The existing calendar picker is unchanged (`src/rt/DatePick.jsx`).
+- **Attention (V1):** blocked, overdue, due within 7 days, or live work (In Progress / High / Critical) with missing dates. Never hours-based.
+- **Check-in:** Status → blocker / waiting note → Start (if missing) → Due (if missing).
+- **No hours or capacity in V1:** Hrs/Wk, Unestimated and weekly capacity are not shown anywhere (Planner, My tasks, task quick-edit, Check-in, Settings → People). The columns `rt_tasks.hours_per_week` and `rt_people.weekly_capacity_hours` are kept, not migrated, and carried through unchanged when a task or person is edited.
+- **Project phase:** Settings shows each project's current phase (permanent id) and Overview cards show it. It needs `supabase/migrations/2026-10-12_rt_projects_phase_key.sql`; until that runs the column is never sent and the field shows as needing the database update.
+- **Pure logic** for the new screens is in `src/rt/v2.js` and covered by `npm run check`.

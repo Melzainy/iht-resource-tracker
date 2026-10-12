@@ -2,17 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="robots" content="noindex, nofollow">
   <title>Resource Tracker — Immersive Homes</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <script>/* light / dark: the saved choice, else the system setting — applied before first paint */try{var t=localStorage.getItem('rt-theme');if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gantari:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="%CSS%">
 </head>
 <body>
-  <div id="root"><p style="padding:24px;font:14px system-ui;color:#5b636d">Loading Resource Tracker…</p></div>
+  <div id="root"><p style="padding:24px;font:14px system-ui;color:#4A4645">Loading Resource Tracker…</p></div>
   <noscript>The Resource Tracker needs JavaScript.</noscript>
   <script src="%JS%"></script>
 </body>

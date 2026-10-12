@@ -134,3 +134,7 @@ There is no login yet. Anyone who has the page link can read and edit the Resour
 - **Limited to the tracker:** that access covers only these four tables. It is not access to anything else in Supabase, and not to the PM Workflow.
 - **What to keep out of it:** do not put confidential client contact details, salaries or HR information in the tracker while it has no login.
 - **Before sharing the link widely:** add Supabase Auth (company email sign-in) and change the policies to `authenticated` only. The tables do not need to change for this.
+
+## Migration for the V1 redesign (not applied)
+
+`supabase/migrations/2026-10-12_rt_projects_phase_key.sql` adds one nullable column, `rt_projects.phase_key`, limited to the six permanent PM phase ids. It changes no existing row. Run it once in SQL Editor before using "Current phase" in Settings → Projects & phases. It is safe to re-run and safe to run before or after deploying the redesign.

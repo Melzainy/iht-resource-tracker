@@ -1,9 +1,10 @@
-// Resource Tracker — standalone, temporary company module.
-// Shares only the website shell with the PM Workflow prototype. It never reads or writes the
-// PM Workflow store: its own datastore (rt_disciplines, rt_people, rt_projects, rt_tasks) sits
-// behind an adapter (local seed now, Supabase in Stage B).
+// Resource Tracker V1 (redesign/resource-tracker-v2) — Overview · Planner · Settings · My tasks · Check-in.
+// Visual and UX follow the approved prototype (ih-resource-tracker-prototype.html). Data does NOT:
+// every screen reads the one store (src/rt/store.js) and every change goes through its validated
+// actions → adapter (Supabase in production, with Realtime; local seed only for the preview build).
+// UI preferences (theme, chosen name, view, Gantt range) are the only things kept in this browser.
 import * as M from './model.js';
-import * as H from './hier.js';
+import * as V from './v2.js';
 import { createStore, useStore } from './store.js';
 import { localAdapter } from './adapters/local.js';
 import { supabaseAdapter } from './adapters/supabase.js';
@@ -11,9 +12,9 @@ import { RT_CONFIG, keyProblem } from './config.js';
 import { createClient } from '@supabase/supabase-js';
 import seed from './seed.json';
 import { PM_PHASES, phaseLabel } from './pm-phases.js';
-import { createPortal } from 'react-dom';
+import { DatePick } from './DatePick.jsx';
 
-const { useState, useEffect, useLayoutEffect, useMemo, useRef } = React;
+const { useState, useEffect, useRef } = React;
 let STORE = null;
 let CONFIG_ERROR = null;
 function getStore() {
@@ -29,439 +30,589 @@ function getStore() {
   STORE = createStore(localAdapter({ seed, key: 'rt-local-v2' }));
   return STORE;
 }
-// Live connection / save status for the header.
-function SyncStatus({ store }) {
-  if (store.adapter.name === 'local') return <span className="rt-src">{store.adapter.label}</span>;
-  const c = store.connection;
-  const conn = c === 'live' ? ['ok', 'Live — changes sync to everyone with this link'] : c === 'connecting' ? ['wait', 'Connecting to the shared database…'] : ['bad', 'Connection lost — reconnecting… (edits may not reach others yet)'];
-  const save = store.error ? ['bad', `Last change not saved: ${store.error}`] : store.saving ? ['wait', 'Saving…'] : store.savedAt ? ['ok', `All changes saved · ${store.savedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`] : null;
-  return <span className="rt-sync" role="status" aria-live="polite"><span className={`rt-sync-c ${conn[0]}`}><i aria-hidden="true" />{conn[1]}</span>{save && <span className={`rt-sync-s ${save[0]}`}>{save[1]}</span>}</span>;
-}
 const todayISO = () => (typeof window !== 'undefined' && window.RT_TODAY) || new Date().toISOString().slice(0, 10);
-const uiKey = 'rt-ui-v2';
-const loadUi = () => { try { return JSON.parse(localStorage.getItem(uiKey)) || {}; } catch (e) { return {}; } };
-const saveUi = (u) => { try { localStorage.setItem(uiKey, JSON.stringify({ ...loadUi(), ...u })); } catch (e) { /* ignore */ } };
 
+// ── Per-browser view preferences (never data) ───────────────────────────────
+const UI_KEY = 'rt-ui-v3';
+const EMPTY_F = { disc: '', person: '', project: '', phase: '', status: '', priority: '', q: '', kpi: '', attn: false };
+const loadUi = () => { let u = {}; try { u = JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch (e) { /* storage unavailable */ } return { view: u.view || 'overview', me: u.me || null, weeks: [4, 8, 12].includes(u.weeks) ? u.weeks : 8, off: 0, details: u.details === true, f: { ...EMPTY_F }, more: false }; };
+const saveUi = (u) => { try { localStorage.setItem(UI_KEY, JSON.stringify({ view: u.view, me: u.me, weeks: u.weeks, details: u.details })); } catch (e) { /* ignore */ } };
+
+const initials = (n) => n.split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+const greet = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
+
+// ── Theme ───────────────────────────────────────────────────────────────────
+const THEME_KEY = 'rt-theme';
+const curTheme = () => { const a = document.documentElement.getAttribute('data-theme'); if (a === 'dark' || a === 'light') return a; return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; };
+function ThemeSwitch() {
+  const [t, setT] = useState(curTheme);
+  useEffect(() => { document.documentElement.setAttribute('data-theme', t); try { localStorage.setItem(THEME_KEY, t); } catch (e) { /* ignore */ } }, [t]);
+  const nx = t === 'dark' ? 'light' : 'dark';
+  return <button type="button" id="themeBtn" className="who ix themebtn" onClick={() => setT(nx)} aria-label={`Switch to ${nx} mode`} title={`Switch to ${nx} mode`}><i aria-hidden="true">{t === 'dark' ? '☀' : '☾'}</i>{t === 'dark' ? 'Light' : 'Dark'}</button>;
+}
+
+// ── Live save / connection status (subtle; errors are shown prominently elsewhere) ──
+function SyncStatus({ store }) {
+  if (store.adapter.name === 'local') return <span className="rt-sync" role="status" title={store.adapter.label}><span className="rt-sync-c wait"><i aria-hidden="true" />Local preview</span></span>;
+  const c = store.connection;
+  const conn = c === 'live' ? ['ok', 'Live', 'Live — changes sync to everyone with this link'] : c === 'connecting' ? ['wait', 'Connecting…', 'Connecting to the shared database…'] : ['bad', 'Reconnecting…', 'Connection lost — reconnecting… (edits may not reach others yet)'];
+  const save = store.error ? ['bad', 'Not saved', `Last change not saved: ${store.error}`] : store.saving ? ['wait', 'Saving…', 'Saving…'] : store.savedAt ? ['ok', `Saved ${store.savedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`, 'All changes saved'] : null;
+  return <span className="rt-sync" role="status" aria-live="polite" title={`${conn[2]}${save ? ` · ${save[2]}` : ''}`}><span className={`rt-sync-c ${conn[0]}`}><i aria-hidden="true" />{conn[1]}</span>{save && <span className={`rt-sync-s ${save[0]}`}>{save[1]}</span>}</span>;
+}
+
+// Hover tips for anything with data-tip (Gantt marks, status bars).
+function TipLayer() {
+  const ref = useRef(null);
+  useEffect(() => {
+    const tip = ref.current;
+    const show = (el, x, y) => { tip.textContent = el.dataset.tip; tip.hidden = false; const r = tip.getBoundingClientRect(); let L = x + 12; let T = y - r.height - 12; if (L + r.width > window.innerWidth - 8) L = window.innerWidth - r.width - 8; if (T < 8) T = y + 16; tip.style.left = `${L}px`; tip.style.top = `${T}px`; };
+    const mv = (e) => { if (window.__rtDrag) return; const el = e.target.closest?.('[data-tip]'); if (el) show(el, e.clientX, e.clientY); else tip.hidden = true; };
+    const hide = () => { tip.hidden = true; };
+    document.addEventListener('mousemove', mv); document.addEventListener('scroll', hide, { passive: true, capture: true });
+    return () => { document.removeEventListener('mousemove', mv); document.removeEventListener('scroll', hide, { capture: true }); };
+  }, []);
+  return <div ref={ref} className="tip" role="tooltip" hidden />;
+}
+
+// ── App shell ───────────────────────────────────────────────────────────────
 export function ResourceTracker() {
   const store = useStore(getStore());
   const [ready, setReady] = useState(!!store.db);
-  const [tab, setTab] = useState('planner');
-  // View state shared by Planner and Timeline (filters, Needs Attention, range, period).
-  const [vs, setVsRaw] = useState(() => { const u = loadUi(); return { f: { disc: '', person: '', project: '', phase: '', status: '', priority: '', q: '', kpi: '' }, mode: u.mode || 'all', range: u.range || 8, offset: 0 }; });
-  const setVs = (p) => setVsRaw((x) => { const n = { ...x, ...p }; saveUi({ range: n.range, mode: n.mode }); return n; });
-  const setF = (p) => setVsRaw((x) => ({ ...x, f: { ...x.f, ...p } }));
-  const [panel, setPanel] = useState(null); // { kind: 'task'|'project'|'person'|'discipline', row }
+  const [loadErr, setLoadErr] = useState(null);
+  const [ui, setUiRaw] = useState(loadUi);
+  const setUi = (p) => setUiRaw((x) => { const n = { ...x, ...(typeof p === 'function' ? p(x) : p) }; saveUi(n); return n; });
   const [toast, setToast] = useState(null);
   const [confirm, setConfirm] = useState(null);
-  const [loadErr, setLoadErr] = useState(null);
+  const [panel, setPanel] = useState(null); // drawers: { kind: 'task'|'project', row }
+  const [sheet, setSheet] = useState(null); // modals: { kind: 'task', id } | { kind: 'who' }
+  const [flow, setFlow] = useState(null); // full screen: { kind: 'check' | 'add' }
   useEffect(() => { if (!store.db) store.init().then(() => setReady(true)).catch((e) => setLoadErr(e.message)); }, []);
-  useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), toast.bad ? 6000 : 2500); return () => clearTimeout(t); }, [toast]);
-  if (CONFIG_ERROR) return <div className="rt"><p className="note bad">Resource Tracker live database is not configured correctly: {CONFIG_ERROR} Showing nothing rather than risk mixing data.</p></div>;
-  if (loadErr) return <div className="rt"><p className="note bad">Could not load the shared Resource Tracker database: {loadErr}</p><button className="btn" onClick={() => location.reload()}>Try again</button></div>;
-  if (!ready || !store.db) return <div className="rt"><p className="muted">Loading Resource Tracker…</p></div>;
-  const db = store.db;
-  const say = (r, okText) => { if (r.ok) { setToast({ text: okText }); return true; } setToast({ text: r.error, bad: true }); return false; };
-  const ctx = { store, db, setPanel, say, setConfirm, vs, setVs, setF };
+  useEffect(() => { if (!toast) return undefined; const t = setTimeout(() => setToast(null), toast.bad ? 6000 : 2200); return () => clearTimeout(t); }, [toast]);
+  const shell = (body) => <div className="rt-app"><header className="top"><div className="wrap"><Brand /></div></header><main className="wrap">{body}</main></div>;
+  if (CONFIG_ERROR) return shell(<p className="note bad">Resource Tracker live database is not configured correctly: {CONFIG_ERROR} Showing nothing rather than risk mixing data.</p>);
+  if (loadErr) return shell(<><p className="note bad">Could not load the shared Resource Tracker database: {loadErr}</p><button className="btn ghost" onClick={() => location.reload()}>Try again</button></>);
+  if (!ready || !store.db) return shell(<p className="muted" style={{ padding: '32px 0' }}>Loading Resource Tracker…</p>);
+  const db = store.db; const today = todayISO(); const I = M.index(db);
+  const say = (r, okText) => { if (r && r.ok) { if (okText) setToast({ text: okText }); return true; } setToast({ text: r?.error || 'Not saved', bad: true }); return false; };
+  const me = ui.me && I.person[ui.me] ? ui.me : null;
+  const myNeeds = me ? V.myTasks(db, me, today).needs : 0;
+  const go = (view, f) => { setUi(() => ({ view, ...(f ? { f: { ...EMPTY_F, ...f }, off: 0 } : {}) })); window.scrollTo(0, 0); };
+  const openTask = (id) => setSheet({ kind: 'task', id });
+  const ctx = { store, db, today, ui, setUi, say, setConfirm, setPanel, setSheet, setFlow, openTask, go, me };
+  const view = ui.view === 'me' && !me ? 'overview' : ui.view;
+  const nav = [['overview', 'Overview'], ['planner', 'Planner'], ['settings', 'Settings']];
   return (
-    <div className="rt">
-      <div className="rt-head">
-        <div><div className="rt-kicker">Company · Resource Tracker <span className="rt-badge">Standalone / Temporary</span></div>
-          <h1>Resource Tracker</h1>
-          <p className="muted small">Planner = enter and edit work inline. Timeline = analyse resources, overlaps and conflicts on a large Gantt. Issues roll up from tasks to people, disciplines and the company. Separate from the PM Workflow: its own people, projects and tasks.</p><SyncStatus store={store} /></div>
-        {store.adapter.name === 'local' && <button className="linkish small rt-reset" onClick={() => setConfirm({ title: 'Reset the preview data?', text: 'All changes made in this browser are discarded and the Excel import is loaded again.', label: 'Reset', action: () => store.reset().then(() => setToast({ text: 'Preview data reset to the Excel import' })) })}>Reset preview data</button>}
-        <nav className="rt-tabs" aria-label="Resource Tracker">
-          {[['planner', 'Planner'], ['timeline', 'Timeline'], ['projects', 'Projects'], ['team', 'Team']].map(([k, l]) => <button key={k} className={tab === k ? 'on' : ''} aria-current={tab === k ? 'page' : undefined} onClick={() => setTab(k)}>{l}</button>)}
-        </nav>
-      </div>
-      {store.error && <p className="note bad small" role="alert">Last change could not be saved: {store.error} — the screen was refreshed from the {store.adapter.name === 'local' ? 'saved' : 'shared'} data.</p>}
-      {tab === 'planner' && <Planner {...ctx} />}
-      {tab === 'timeline' && <ResourceTimeline {...ctx} />}
-      {tab === 'projects' && <Projects {...ctx} />}
-      {tab === 'team' && <Team {...ctx} />}
+    <div className="rt-app">
+      <header className="top">
+        <div className="wrap">
+          <Brand />
+          <nav className="seg mainnav" aria-label="Sections">{nav.map(([k, l]) => <button key={k} id={`v-${k}`} className="ix" aria-pressed={view === k} aria-current={view === k ? 'page' : undefined} onClick={() => go(k)}>{l}</button>)}</nav>
+          <button id="v-me" className="mytasks ix" aria-pressed={view === 'me'} onClick={() => (me ? go('me') : setSheet({ kind: 'who', then: 'me' }))}>My tasks{myNeeds ? <span className="badge" title={`${myNeeds} of your tasks are missing planning data`}>{myNeeds}</span> : null}</button>
+          <button id="whoBtn" className="who ix" aria-label="Choose your name" onClick={() => setSheet({ kind: 'who' })}>{me ? <><span className="avatar">{initials(I.person[me].name)}</span>{I.person[me].name} <span aria-hidden="true">▾</span></> : 'Choose your name'}</button>
+          <ThemeSwitch />
+          <SyncStatus store={store} />
+        </div>
+      </header>
+      {store.error && <div className="errbar" role="alert"><div className="wrap">Last change could not be saved: {store.error} — the screen was refreshed from the {store.adapter.name === 'local' ? 'saved' : 'shared'} data.</div></div>}
+      <main className={`wrap ${view === 'planner' ? 'wide' : ''}`} id="app">
+        {view === 'overview' && <Overview {...ctx} />}
+        {view === 'planner' && <Planner {...ctx} />}
+        {view === 'settings' && <Settings {...ctx} />}
+        {view === 'me' && <MyTasks {...ctx} />}
+      </main>
+      <footer className="foot"><div className="wrap"><span>Shared by link · no login yet — don’t enter confidential client, salary or HR information.</span>
+        {store.adapter.name === 'local' && <button className="linkish" onClick={() => setConfirm({ title: 'Reset the preview data?', text: 'All changes made in this browser are discarded and the Excel import is loaded again.', label: 'Reset', action: () => store.reset().then(() => setToast({ text: 'Preview data reset' })) })}>Reset preview data</button>}</div></footer>
+      {sheet?.kind === 'task' && <TaskSheet {...ctx} id={sheet.id} close={() => setSheet(null)} />}
+      {sheet?.kind === 'who' && <WhoSheet {...ctx} close={() => setSheet(null)} pick={(id) => { const then = sheet.then; setSheet(null); setUi({ me: id, ...(then && id ? { view: then } : {}) }); }} />}
       {panel?.kind === 'task' && <TaskPanel {...ctx} row={panel.row} close={() => setPanel(null)} />}
       {panel?.kind === 'project' && <ProjectPanel {...ctx} row={panel.row} close={() => setPanel(null)} />}
-      {panel?.kind === 'person' && <PersonPanel {...ctx} row={panel.row} close={() => setPanel(null)} />}
-      {panel?.kind === 'discipline' && <DisciplinePanel {...ctx} row={panel.row} close={() => setPanel(null)} />}
+      {flow?.kind === 'check' && me && <CheckIn {...ctx} close={() => setFlow(null)} />}
+      {flow?.kind === 'add' && <AddTaskFlow {...ctx} close={() => setFlow(null)} />}
       {confirm && <Confirm {...confirm} close={() => setConfirm(null)} />}
-      {toast && <div className={`toast ${toast.bad ? 'bad' : 'ok'}`} role="status" onClick={() => setToast(null)}>{toast.text}</div>}
+      {toast && <div className={`toast ${toast.bad ? 'bad' : ''}`} role="status" onClick={() => setToast(null)}>{toast.text}</div>}
+      <TipLayer />
     </div>
   );
 }
+const Brand = () => <div className="brand"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M12 32H5V8H12V32ZM20 32H13V8H20V32ZM35 32H28V23H21V16H28V8H35V32Z" fill="currentColor" /></svg><span>Resource Tracker</span></div>;
 
 // ── Shared bits ─────────────────────────────────────────────────────────────
-const stKey = (s) => (s || 'none').replace(/\s/g, '').toLowerCase();
-const Status = ({ s }) => (s ? <span className={`rt-st st-${stKey(s)}`}>{s === 'Blocked' ? '⚠︎ ' : ''}{s}</span> : <span className="rt-st st-none">No status</span>);
-const fmtH = (h) => (Math.round(h * 10) / 10).toString();
-const hrsText = (t) => (t.hours_per_week == null ? 'Unestimated' : `${fmtH(t.hours_per_week)} h/wk`);
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const stLabel = (s) => s || 'No status';
+const Dot = ({ s }) => <span className={`dot st-${V.stKey(s)}`} aria-hidden="true" />;
+function Modal({ close, children, label, wide }) {
+  const ref = useRef(null);
+  useEffect(() => { const f = (e) => { if (e.key === 'Escape') close(); }; window.addEventListener('keydown', f); ref.current?.querySelector('button:not(.x),input,select,textarea')?.focus(); return () => window.removeEventListener('keydown', f); }, []);
+  return <div className="scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}><div className={`sheet ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={label} ref={ref}>
+    <button type="button" className="iconbtn x ix" aria-label="Close" onClick={close}>×</button>{children}</div></div>;
+}
 function Drawer({ title, close, children, footer }) {
   const ref = useRef(null);
   useEffect(() => { const f = (e) => { if (e.key === 'Escape') close(); }; window.addEventListener('keydown', f); ref.current?.querySelector('input,select,textarea')?.focus(); return () => window.removeEventListener('keydown', f); }, []);
   return <><div className="rt-scrim" onClick={close} /><aside className="rt-drawer" role="dialog" aria-label={title} ref={ref}>
-    <header><h2>{title}</h2><button className="linkish" aria-label="Close" onClick={close}>✕</button></header>
+    <header><h2>{title}</h2><button className="iconbtn ix" aria-label="Close" onClick={close}>×</button></header>
     <div className="rt-drawer-b">{children}</div><footer>{footer}</footer></aside></>;
 }
 function Confirm({ title, text, action, label = 'Delete', close }) {
-  return <div className="rt-modal" role="alertdialog" aria-label={title}><div className="rt-modal-b"><h2>{title}</h2><p>{text}</p>
-    <div className="row"><button className="btn danger" onClick={() => { action(); close(); }}>{label}</button><button className="btn" onClick={close}>Cancel</button></div></div></div>;
+  return <div className="scrim"><div className="sheet" role="alertdialog" aria-label={title}><h3>{title}</h3><p className="muted">{text}</p>
+    <div className="row-btns"><button className="btn danger ix" onClick={() => { action(); close(); }}>{label}</button><button className="btn ghost ix" onClick={close}>Cancel</button></div></div></div>;
 }
-// Expand/collapse state. Collapsed by default; while a task filter is on, matches open automatically.
-const OPEN_CACHE = {}; // expand state per view, survives switching tabs
-function useOpen(filtering, resetKey, name) {
-  const [open, setOpenRaw] = useState(() => (OPEN_CACHE[name]?.key === resetKey ? OPEN_CACHE[name].open : {}));
-  const first = useRef(true);
-  useEffect(() => { if (first.current) { first.current = false; return; } setOpenRaw({}); }, [resetKey]);
-  useEffect(() => { if (name) OPEN_CACHE[name] = { key: resetKey, open }; }, [open, resetKey]);
-  const setOpen = setOpenRaw;
-  const isOpen = (id) => (id in open ? open[id] : filtering);
-  const toggle = (id) => setOpen((o) => ({ ...o, [id]: !(id in o ? o[id] : filtering) }));
-  const setOne = (id, v) => setOpen((o) => ({ ...o, [id]: v }));
-  const setAll = (tree, v) => setOpen(Object.fromEntries(tree.flatMap(({ d, people }) => [[d.id, v], ...people.map(({ p }) => [p.id, v])])));
-  const only = (tree, did) => setOpen((o) => ({ ...o, ...Object.fromEntries(tree.map(({ d }) => [d.id, d.id === did])) }));
-  return { isOpen, toggle, setAll, setOne, only };
+function StackBar({ tasks, label }) {
+  const n = tasks.length; if (!n) return <div className="sbar empty" />;
+  const mix = V.statusMix(tasks);
+  return <div className="sbar">{V.BUCKETS.map(([k, l]) => (mix[k] ? <i key={k} className={`seg-${k}`} style={{ flex: `${mix[k]} 0 0` }} data-tip={`${label} · ${l}: ${mix[k]} of ${n}`} /> : null))}</div>;
 }
-const Chev = ({ open }) => <span className="rt-chev" aria-hidden="true">{open ? '▾' : '▸'}</span>;
-function DiscRollup({ s }) {
-  const iss = H.disciplineIssues(s);
-  return <span className="rt-roll"><span className="rt-roll-a">{H.plural(s.people, 'person', 'people')} · {H.plural(s.active, 'active task')}</span>
-    <span className="rt-roll-b">{iss.length ? <>{iss.some(([k]) => k === 'bad') && <i aria-hidden="true">⚠︎ </i>}{iss.map(([k, txt], i) => <span key={i} className={k}>{i ? ' · ' : ''}{txt}</span>)}</> : <span className="ok">No issues</span>}</span></span>;
+const StatusLegend = () => <div className="legend">{V.BUCKETS.map(([k, l]) => <span key={k}><i className={`sw seg-${k}`} />{l}</span>)}</div>;
+// Text field that saves when you leave it or press Enter (Esc reverts).
+function InlineText({ value, onSave, label, id, placeholder, list, inputMode }) {
+  const [v, setV] = useState(value ?? ''); const base = useRef(value ?? '');
+  useEffect(() => { if ((value ?? '') !== base.current) { setV((cur) => (cur === base.current ? value ?? '' : cur)); base.current = value ?? ''; } }, [value]);
+  const save = () => { if (v !== (value ?? '')) { if (!onSave(v)) setV(value ?? ''); } };
+  return <input type="text" id={id} aria-label={label} value={v} placeholder={placeholder} list={list} inputMode={inputMode} onChange={(e) => setV(e.target.value)} onBlur={save}
+    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } else if (e.key === 'Escape') { setV(value ?? ''); } }} />;
 }
-function PersonHead({ s }) { const h = H.personHeadline(s); return <span className={`rt-ph ${h.key}`}>{h.text}</span>; }
-function PersonIssues({ s }) {
-  const bad = [s.blocked && `${s.blocked} blocked`, s.overdue && `${s.overdue} overdue`].filter(Boolean);
-  return <span className="rt-proll">{H.personLine(s)}{bad.length ? <span className="rt-pbad"> · ⚠︎ {bad.join(' · ')}</span> : null}{s.peak >= 2 ? <span className="rt-pov"> · {s.peak} concurrent</span> : null}</span>;
-}
-// Hover details for a task: fields + computed overdue / overlap / weekly impact.
-function TaskTip({ db, t, today, pos }) {
-  const I = M.index(db); const p = I.person[t.person_id]; const pr = I.project[t.project_id];
-  const od = M.overdueDays(t, today); const reasons = [];
-  if (od) reasons.push(`${od} day${od === 1 ? '' : 's'} overdue`);
-  if (M.isBlocked(t)) reasons.push('Blocked');
-  if (M.dateKind(t) === 'due-only') reasons.push('Start not defined'); else if (M.dateKind(t) === 'start-only') reasons.push('Due not defined'); else if (M.dateKind(t) === 'none') reasons.push('Dates not defined');
-  if (!od && M.isActive(t) && t.due_date && t.due_date >= today) { const n = M.daysBetween(today, t.due_date); reasons.push(n === 0 ? 'Due today' : `Due in ${n}d`); }
-  const mine = db.rt_tasks.filter((x) => x.person_id === t.person_id && x.active !== false).map((x) => (x.id === t.id ? t : x));
-  const ov = (M.overlapMap(mine)[t.id] || []).map((id) => mine.find((x) => x.id === id)).filter(Boolean);
-  let impact = null;
-  if (t.start_date && t.due_date && M.isActive(t)) {
-    const n = Math.min(26, Math.ceil((M.daysBetween(M.weekStart(t.start_date), t.due_date) + 1) / 7));
-    const loads = M.personLoad({ ...db, rt_tasks: mine }, t.person_id, M.weeksFrom(t.start_date, n));
-    const span = `${M.wkLabel(loads[0].wk)}${loads.length > 1 ? `–${M.wkLabel(loads[loads.length - 1].wk)}` : ''}`;
-    if (t.hours_per_week == null) impact = `${span}: hours not estimated — weekly impact unknown`;
-    else { const peak = loads.reduce((a, w) => (w.h > a.h ? w : a), loads[0]); impact = `${span}: +${fmtH(t.hours_per_week)} h/wk · busiest ${M.wkLabel(peak.wk)} ${fmtH(peak.h)}${peak.cap ? ` / ${peak.cap} h (${peak.pct}%${peak.key === 'over' ? ', over capacity' : ''})` : ' h'}`; }
-  }
-  const vw = typeof window !== 'undefined' ? window.innerWidth : 1200; const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
-  const left = Math.min(pos.x + 14, vw - 340); const top = pos.y + 16 + 330 > vh ? Math.max(8, pos.y - 340) : pos.y + 16;
-  return <div className="rt-tip" role="tooltip" style={{ left: Math.max(8, left), top: Math.max(8, top) }}>
-    <div className="rt-tip-p">{pr?.name || 'No project'}</div><div className="rt-tip-t">{t.title || 'New task'}</div>
-    <dl><dt>Phase</dt><dd className={t.phase_key ? '' : 'muted'}>{phaseLabel(t.phase_key)}</dd><dt>Person</dt><dd>{p?.name || '—'}</dd>
-      <dt>Start</dt><dd>{t.start_date ? M.fmtD(t.start_date, true) : 'not defined'}</dd><dt>Due</dt><dd>{t.due_date ? M.fmtD(t.due_date, true) : 'not defined'}</dd>
-      <dt>Hrs/Week</dt><dd>{hrsText(t)}</dd><dt>Status</dt><dd>{t.status || 'not set'}</dd><dt>Priority</dt><dd>{t.priority || 'not set'}</dd></dl>
-    {t.notes && <div className={`rt-tip-n ${M.isBlocked(t) ? 'bl' : ''}`}>{t.notes}</div>}
-    {reasons.length > 0 && <div className="rt-tip-c">{reasons.join(' · ')}</div>}
-    {ov.length > 0 && <div className="rt-tip-o">Overlaps {H.plural(ov.length, 'task')}: {ov.slice(0, 3).map((x) => `${I.project[x.project_id]?.name || '—'} — ${x.title}`).join('; ')}{ov.length > 3 ? '…' : ''}</div>}
-    {impact && <div className="rt-tip-i">{impact}</div>}
-  </div>;
-}
-function useTip() {
-  const [tip, setTip] = useState(null);
-  const tipFor = (t) => ({ onMouseEnter: (e) => setTip({ t, x: e.clientX, y: e.clientY }), onMouseMove: (e) => setTip({ t, x: e.clientX, y: e.clientY }), onMouseLeave: () => setTip(null) });
-  return [tip, setTip, tipFor];
-}
-// Width of an element that may be unmounted/remounted (e.g. Timeline ↔ Focus); re-observes on change.
-function useWidth() {
-  const [w, setW] = useState(0); const ro = useRef(null);
-  const ref = React.useCallback((el) => {
-    ro.current?.disconnect(); ro.current = null;
-    if (!el) return;
-    setW(el.clientWidth);
-    if (typeof ResizeObserver !== 'undefined') { ro.current = new ResizeObserver(() => { if (el.isConnected && el.clientWidth) setW(el.clientWidth); }); ro.current.observe(el); }
-  }, []);
-  return [ref, w];
+function Switch({ on, onChange, label }) { return <button type="button" className="switch" role="switch" aria-checked={!!on} aria-label={label} onClick={() => onChange(!on)} />; }
+// One task as a list row (Overview, My tasks).
+function TaskListRow({ db, t, today, onOpen, showPerson, mine }) {
+  const I = M.index(db); const dt = V.dueText(t, today); const miss = M.isActive(t) ? V.planningMissing(t) : [];
+  return <button className="row ix" data-task={t.id} onClick={() => onOpen(t.id)}>
+    <Dot s={t.status} />
+    <span style={{ minWidth: 0 }}><span className="t">{t.title}</span>
+      <span className="s"><span className="proj">{I.project[t.project_id]?.name || '—'}</span>{showPerson && <span>{I.person[t.person_id]?.name || '—'}</span>}<span>{stLabel(t.status)}</span>
+        {t.notes && (t.status === 'Blocked' || t.status === 'Waiting') && <span>“{t.notes}”</span>}
+        {miss.length > 0 && mine && <span className="need">＋ Add {miss.join(', ')}</span>}</span></span>
+    <span className="right"><span className={dt.late ? 'late' : ''}>{dt.txt}</span></span>
+  </button>;
 }
 
-// ── Gantt (shared visual language with the PM Workflow Master Timeline) ─────
-// Continuous date axis: month row + week row, faint week lines, month lines, current-week band,
-// Today line, floating bars. Used by the Planner (compact) and the Timeline (large).
-function geometry(vs, avail, minCol) {
-  const today = todayISO();
-  const weeks = M.weeksFrom(M.addDays(M.weekStart(today), (vs.offset - 1) * 7), vs.range);
-  const start = weeks[0]; const end = M.addDays(weeks[weeks.length - 1], 7);
-  const colW = Math.max(minCol, avail ? Math.floor(avail / vs.range) : minCol);
-  const W = colW * weeks.length; const dayW = colW / 7;
-  const x = (d) => ((M.toD(d) - M.toD(start)) / 864e5) * dayW;
-  const curWk = M.weekStart(today);
-  const todayX = today >= start && today < end ? x(today) + dayW / 2 : null;
-  const months = [{ d: start, x: 0 }];
-  for (let d = `${start.slice(0, 8)}01`; d < end; ) { const [y, m] = d.split('-').map(Number); d = `${m === 12 ? y + 1 : y}-${String(m === 12 ? 1 : m + 1).padStart(2, '0')}-01`; if (d < end) months.push({ d, x: x(d) }); }
-  months.forEach((m, i) => { m.w = (months[i + 1]?.x ?? W) - m.x; const [y, mo] = m.d.split('-').map(Number); m.label = m.w > 110 ? `${MONTHS[mo - 1]} ${y}` : m.w > 40 ? MONTHS[mo - 1].slice(0, 3) : ''; });
-  return { today, weeks, start, end, colW, W, dayW, x, curWk, todayX, months };
-}
-function GHeader({ g }) {
+// ── Overview ────────────────────────────────────────────────────────────────
+function Overview({ db, today, go, openTask, me }) {
+  const k = V.overviewKpis(db, today); const cards = V.projectCards(db, today); const attn = V.needsAttention(db, today);
+  const I = M.index(db); const first = me ? I.person[me]?.name.split(' ')[0] : null;
   return <>
-    <div className="rg-months">{g.months.map((m) => <span key={m.d} className="rg-m" style={{ left: m.x, width: m.w }}>{m.label}</span>)}</div>
-    <div className="rg-weeks">{g.weeks.map((wk) => <span key={wk} className={`rg-w ${wk === g.curWk ? 'cur' : ''}`} style={{ left: g.x(wk), width: g.colW }}><b>{M.wkLabel(wk)}</b>{g.colW >= 64 && <i>{M.fmtD(wk)}</i>}</span>)}</div>
-    {g.todayX != null && <span className="rg-today-h" style={{ left: g.todayX }}>Today {M.fmtD(g.today)}</span>}
-  </>;
-}
-function GBg({ g }) {
-  const cw = g.weeks.indexOf(g.curWk);
-  return <>
-    {cw >= 0 && <span className="rg-cur" style={{ left: g.x(g.curWk), width: g.colW }} />}
-    {g.weeks.slice(1).map((wk) => <span key={wk} className="rg-wl" style={{ left: g.x(wk) }} />)}
-    {g.months.slice(1).map((m) => <span key={m.d} className="rg-ml" style={{ left: m.x }} />)}
-    {g.todayX != null && <span className="rg-today" style={{ left: g.todayX }} />}
-  </>;
-}
-// Summary bar (like PM phase rows): union of the scheduled ranges of active tasks.
-function Coverage({ tasks, g, cls = '' }) {
-  const r = tasks.filter((t) => M.isActive(t) && t.start_date && t.due_date).map((t) => [t.start_date, t.due_date]).sort((a, b) => a[0].localeCompare(b[0]));
-  const segs = []; r.forEach(([a, b]) => { const l = segs[segs.length - 1]; if (l && a <= M.addDays(l[1], 1)) { if (b > l[1]) l[1] = b; } else segs.push([a, b]); });
-  return segs.map(([a, b]) => { const x0 = Math.max(0, g.x(a)); const x1 = Math.min(g.W, g.x(M.addDays(b, 1))); return x1 > x0 ? <span key={a} className={`rg-cov ${cls}`} style={{ left: x0, width: x1 - x0 }} title={`Scheduled work ${M.fmtD(a)} – ${M.fmtD(b)}`} /> : null; });
-}
-// Weekly load marks on a person row — subtle text, no cell boxes.
-function LoadMarks({ db, pid, g }) {
-  return M.personLoad(db, pid, g.weeks).map((w) => {
-    if (!w.h && !w.unest) return null;
-    const txt = w.cap ? `${w.pct}%` : `${fmtH(w.h)} h`;
-    return <span key={w.wk} className={`rg-load ${w.key}`} style={{ left: g.x(w.wk), width: g.colW }} title={`${M.wkLabel(w.wk)}: ${fmtH(w.h)} of ${w.cap ?? '—'} h · ${w.label}${w.unest ? ` · ${w.unest} unestimated task(s) not counted` : ''}`}>
-      {w.h ? <>{w.key === 'over' && '▲ '}{txt}</> : null}{w.unest ? <em>{w.h ? ' +' : ''}{w.unest}?</em> : null}</span>;
-  });
-}
-function ganttMarks(t, g, compact = false) {
-  const { x, W, dayW, start, end, today, todayX } = g;
-  const kind = M.dateKind(t); const od = M.overdueDays(t, today); const sk = stKey(t.status);
-  const cx = (v) => Math.max(0, Math.min(W, v));
-  const inR = (d) => d >= start && d < end;
-  const els = [];
-  const label = (a, b, text, cls = '') => { if (!text) return; if (b + 150 < W) els.push(<span key="lbl" className={`rg-lbl ${cls}`} style={{ left: b + 6 }}>{text}</span>); else if (a > 150) els.push(<span key="lbl" className={`rg-lbl r ${cls}`} style={{ right: W - a + 6 }}>{text}</span>); };
-  const overdue = (dueEndX) => {
-    if (!od) return null;
-    const a = cx(dueEndX); const b = todayX != null ? todayX : (today >= end ? W : 0);
-    if (b > a + 1) els.push(<span key="ovx" className="rg-ovx" style={{ left: a, width: b - a }} />);
-    if (kind === 'bar' && dueEndX >= 0 && dueEndX <= W) els.push(<span key="ovd" className="rg-ovd" style={{ left: dueEndX - 1 }} />);
-    els.push(<span key="ovb" className="rg-ovb" style={{ left: Math.min(W - 92, Math.max(b, a) + 6) }}>Overdue · {od}d</span>);
-    return true;
-  };
-  const bl = t.status === 'Blocked';
-  const text = compact ? (bl ? '⚠︎ BLOCKED' : '') : `${bl ? '⚠︎ BLOCKED · ' : t.status === 'Done' ? '✓ Done · ' : ''}${hrsText(t)}`;
-  if (kind === 'bar') {
-    const a = x(t.start_date); const b = x(M.addDays(t.due_date, 1));
-    if (b <= 0 && !od) els.push(<span key="e" className="rg-edge left">◂ ended {M.fmtD(t.due_date)}</span>);
-    else if (a >= W) els.push(<span key="e" className="rg-edge right">starts {M.fmtD(t.start_date)} ▸</span>);
-    else {
-      if (b > 0) { els.push(<span key="bar" className={`rg-bar b-${sk} ${od ? 'is-od' : ''} ${t.hours_per_week == null ? 'unest' : ''}`} style={{ left: cx(a), width: Math.max(6, cx(b) - cx(a)) }} />); if (!od) label(cx(a), cx(b), text, bl ? 'bl' : ''); }
-      else els.push(<span key="e" className="rg-edge left od">◂ due {M.fmtD(t.due_date)}</span>);
-      overdue(b);
-    }
-  } else if (kind === 'due-only') {
-    const dx = x(t.due_date) + dayW / 2;
-    if (inR(t.due_date)) { els.push(<span key="mk" className={`rg-ms ${od ? 'od' : ''}`} style={{ left: dx }} title="Start not defined">◆</span>); if (!od) label(dx - 6, dx + 6, compact ? '' : `Start not defined · due ${M.fmtD(t.due_date)}`); }
-    else if (!od) els.push(<span key="e" className={`rg-edge ${t.due_date < start ? 'left' : 'right'}`}>{t.due_date < start ? `◂ due ${M.fmtD(t.due_date)} · Start not defined` : `Start not defined · due ${M.fmtD(t.due_date)} ▸`}</span>);
-    else els.push(<span key="e" className="rg-edge left od">◂ due {M.fmtD(t.due_date)}</span>);
-    overdue(x(M.addDays(t.due_date, 1)));
-  } else if (kind === 'start-only') {
-    const sx = x(t.start_date);
-    if (inR(t.start_date)) { els.push(<span key="tail" className="rg-tail" style={{ left: sx, width: W - sx }} />); els.push(<span key="mk" className="rg-st" style={{ left: sx }} title="Due not defined">▶</span>); label(sx, sx + 8, compact ? '' : `Due not defined · from ${M.fmtD(t.start_date)}`); }
-    else els.push(<span key="e" className={`rg-edge ${t.start_date < start ? 'left' : 'right'}`}>{t.start_date < start ? `◂ started ${M.fmtD(t.start_date)} · Due not defined` : `starts ${M.fmtD(t.start_date)} ▸ · Due not defined`}</span>);
-  } else els.push(<span key="n" className="rg-nodate">Dates not defined</span>);
-  return els;
-}
-
-// ── Shared toolbar pieces (Planner and Timeline share the same filters) ─────
-function KpiStrip({ db, vs, setF }) {
-  const kc = H.kpiCounts(db, todayISO(), vs.f);
-  return <div className="rt-kpis compact" role="group" aria-label="Key figures — click to filter">
-    {H.KPIS.map(([k, label, unit]) => <button key={k} title={H.KPI_HELP[k]} className={`rt-kpi k-${k} ${vs.f.kpi === k ? 'on' : ''} ${kc[k] ? '' : 'zero'}`} aria-pressed={vs.f.kpi === k} onClick={() => setF({ kpi: vs.f.kpi === k ? '' : k })}>
-      <b>{kc[k]}</b><span>{label}{unit ? <em> ({unit})</em> : null}</span></button>)}
-  </div>;
-}
-function RangeBar({ vs, setVs, g }) {
-  const step = vs.range / 2;
-  return <>
-    <div className="seg" role="group" aria-label="Show"><button className={vs.mode === 'all' ? 'on' : ''} aria-pressed={vs.mode === 'all'} onClick={() => setVs({ mode: 'all' })}>All</button><button className={vs.mode === 'attention' ? 'on' : ''} aria-pressed={vs.mode === 'attention'} onClick={() => setVs({ mode: 'attention' })}>Needs Attention</button></div>
-    <div className="seg" role="group" aria-label="Range">{[4, 8, 12].map((n) => <button key={n} className={vs.range === n ? 'on' : ''} aria-pressed={vs.range === n} onClick={() => setVs({ range: n })}>{n} Weeks</button>)}</div>
-    <div className="seg" role="group" aria-label="Period"><button onClick={() => setVs({ offset: vs.offset - step })} aria-label="Previous">‹ Previous</button><button className={vs.offset === 0 ? 'on' : ''} onClick={() => setVs({ offset: 0 })}>Today</button><button onClick={() => setVs({ offset: vs.offset + step })} aria-label="Next">Next ›</button></div>
-    <span className="rt-period">{M.wkLabel(g.start)}–{M.wkLabel(g.weeks[g.weeks.length - 1])} · {M.fmtD(g.start)} – {M.fmtD(M.addDays(g.end, -1), true)}</span>
-  </>;
-}
-const EMPTY_F = { disc: '', person: '', project: '', phase: '', status: '', priority: '', q: '', kpi: '' };
-function FilterBar({ db, vs, setF, setVs }) {
-  const f = vs.f;
-  const F = (k) => (e) => setF({ [k]: e.target.value, ...(k === 'disc' ? { person: '' } : {}) });
-  const people = M.sortBy(db.rt_people.filter((p) => (!f.disc || p.discipline_id === f.disc)));
-  const active = [f.disc && 'discipline', f.person && 'person', f.project && 'project', f.phase && 'phase', f.status && 'status', f.priority && 'priority', f.q && 'search', f.kpi && 'KPI', vs.mode === 'attention' && 'Needs Attention'].filter(Boolean);
-  return <div className="rt-toolbar rt-filters">
-    <label className="rt-filter rt-search">Search<input id="rt-q" value={f.q} onChange={F('q')} placeholder="Project, task, person or note" /></label>
-    <label className="rt-filter">Discipline<select id="rt-f-disc" value={f.disc} onChange={F('disc')}><option value="">All</option>{M.disciplinesOf(db).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>
-    <label className="rt-filter">Person<select id="rt-f-person2" value={f.person} onChange={F('person')}><option value="">All</option>{people.map((p) => <option key={p.id} value={p.id}>{p.name}{p.active ? '' : ' (inactive)'}</option>)}</select></label>
-    <label className="rt-filter">Project<select id="rt-f-project2" value={f.project} onChange={F('project')}><option value="">All</option>{M.sortBy(db.rt_projects).map((p) => <option key={p.id} value={p.id}>{p.name}{p.active ? '' : ' (archived)'}</option>)}</select></label>
-    <label className="rt-filter">Phase<select id="rt-f-phase" value={f.phase} onChange={F('phase')}><option value="">All</option><option value="-">Not assigned</option>{PM_PHASES.map((p) => <option key={p.key} value={p.key}>{p.no} {p.label}</option>)}</select></label>
-    <label className="rt-filter">Status<select id="rt-f-status2" value={f.status} onChange={F('status')}><option value="">All</option>{M.STATUSES.map((s) => <option key={s}>{s}</option>)}<option value="-">Not set</option></select></label>
-    <label className="rt-filter">Priority<select id="rt-f-priority2" value={f.priority} onChange={F('priority')}><option value="">All</option>{['Critical', 'High', 'Medium', 'Low'].map((s) => <option key={s}>{s}</option>)}<option value="-">Not set</option></select></label>
-    {active.length > 0 && <button className="linkish small rt-clear" onClick={() => { setVs({ f: EMPTY_F, mode: 'all' }); }}>Clear filters ({active.join(', ')})</button>}
-  </div>;
-}
-
-// ── Compact calendar picker (Start / Due) ───────────────────────────────────
-const parseTyped = (s, ref) => {
-  const v = s.trim(); if (!v) return '';
-  let m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/); if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
-  m = v.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/); if (m) { const y = m[3] ? (m[3].length === 2 ? `20${m[3]}` : m[3]) : ref.slice(0, 4); return `${y}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`; }
-  m = v.match(/^(\d{1,2})\s*([A-Za-z]{3,})\.?\s*(\d{4})?$/); if (m) { const mo = MONTHS.findIndex((n) => n.toLowerCase().startsWith(m[2].toLowerCase().slice(0, 3))); if (mo >= 0) return `${m[3] || ref.slice(0, 4)}-${String(mo + 1).padStart(2, '0')}-${m[1].padStart(2, '0')}`; }
-  return null;
-};
-const validISO = (s) => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s) && M.iso(M.toD(s)) === s;
-function DatePick({ value, onPick, label, className = '', children }) {
-  const [open, setOpen] = useState(false);
-  const [view, setView] = useState('');
-  const [typed, setTyped] = useState('');
-  const [bad, setBad] = useState(false);
-  const [pos, setPos] = useState(null);
-  const btn = useRef(null); const pop = useRef(null);
-  // The calendar is portalled to <body> and placed from the field's screen position, so the
-  // Planner/Gantt scroll containers and sticky layers can never clip or cover it.
-  const place = () => {
-    const r = btn.current?.getBoundingClientRect(); if (!r) return;
-    const h = pop.current?.offsetHeight || 292; const w = pop.current?.offsetWidth || 232; const vh = window.innerHeight; const vw = window.innerWidth;
-    let top = r.bottom + 3; if (top + h > vh - 8 && r.top - h - 3 >= 8) top = r.top - h - 3; else if (top + h > vh - 8) top = Math.max(8, vh - h - 8);
-    const p = { top: Math.round(top), left: Math.round(Math.max(8, Math.min(r.left, vw - w - 8))) };
-    setPos((o) => (o && o.top === p.top && o.left === p.left ? o : p));
-  };
-  const show = () => { const base = value || todayISO(); setView(base.slice(0, 7)); setTyped(''); setBad(false); place(); setOpen(true); };
-  useLayoutEffect(() => { if (open) place(); }, [open, view]);
-  useEffect(() => {
-    if (!open) return undefined;
-    const out = (e) => { if (!pop.current?.contains(e.target) && !btn.current?.contains(e.target)) setOpen(false); };
-    const re = () => place(); const key = (e) => { if (e.key === 'Escape') { setOpen(false); btn.current?.focus(); } };
-    document.addEventListener('mousedown', out); window.addEventListener('scroll', re, true); window.addEventListener('resize', re); document.addEventListener('keydown', key);
-    return () => { document.removeEventListener('mousedown', out); window.removeEventListener('scroll', re, true); window.removeEventListener('resize', re); document.removeEventListener('keydown', key); };
-  }, [open]);
-  const choose = (v) => { setOpen(false); onPick(v); btn.current?.focus(); };
-  const vw = view || (value || todayISO()).slice(0, 7);
-  const [vy, vm] = vw.split('-').map(Number);
-  const first = `${vw}-01`; const lead = open ? (M.toD(first).getUTCDay() + 6) % 7 : 0;
-  const cells = open ? Array.from({ length: 42 }, (_, i) => M.addDays(first, i - lead)) : [];
-  const shift = (n) => { const d = new Date(Date.UTC(vy, vm - 1 + n, 1)); setView(M.iso(d).slice(0, 7)); };
-  const today = todayISO();
-  return <>
-    <button type="button" ref={btn} className={`rt-in rt-dbtn ${className} ${open ? 'open' : ''}`} aria-label={label} aria-haspopup="dialog" aria-expanded={open} title={label} onClick={() => (open ? setOpen(false) : show())}
-      onKeyDown={(e) => { if (e.key === 'ArrowDown' && !open) { e.preventDefault(); show(); } }}>{children}</button>
-    {open && pos && createPortal(<div ref={pop} className="rt-cal" role="dialog" aria-label={`${label} — choose a date`} style={{ top: pos.top, left: pos.left }}>
-      <div className="rt-cal-h"><button type="button" aria-label="Previous month" onClick={() => shift(-1)}>‹</button><b>{MONTHS[vm - 1]} {vy}</b><button type="button" aria-label="Next month" onClick={() => shift(1)}>›</button></div>
-      <div className="rt-cal-g" role="grid">{['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].map((d) => <span key={d} className="dow">{d}</span>)}
-        {cells.map((d) => <button type="button" key={d} role="gridcell" aria-label={M.fmtD(d, true)} aria-selected={d === value} className={`${d.slice(0, 7) === vw ? '' : 'out'} ${d === value ? 'sel' : ''} ${d === today ? 'tod' : ''}`} onClick={() => choose(d)}>{+d.slice(8)}</button>)}</div>
-      <div className="rt-cal-f">
-        <input className={`rt-cal-in ${bad ? 'bad' : ''}`} aria-label="Type a date" placeholder="Type e.g. 12 Oct" value={typed} onChange={(e) => { setTyped(e.target.value); setBad(false); }}
-          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); const v = parseTyped(typed, value || today); if (v === '' || validISO(v)) choose(v || null); else setBad(true); } }} />
-        <button type="button" onClick={() => choose(today)}>Today</button>
-        <button type="button" className="clr" onClick={() => choose(null)} disabled={!value}>Clear</button>
+    <section className="owner-hero">
+      <h1>{first ? `${greet()}, ${first}` : 'Overview'}</h1>
+      <div className="kpis">
+        <button className="kpi ix" data-okpi="blocked" onClick={() => go('planner', { kpi: 'blocked' })} title="Show blocked tasks in the Planner"><span className="label">Blocked</span><span className={`big-num ${k.blocked ? 'red' : ''}`}>{k.blocked}</span></button>
+        <button className="kpi ix" data-okpi="late" onClick={() => go('planner', { kpi: 'overdue' })} title="Show late tasks in the Planner"><span className="label">Late</span><span className={`big-num ${k.late ? 'red' : ''}`}>{k.late}</span></button>
+        <div className="kpi" data-okpi="done"><span className="label">Done</span><span className="big-num">{k.done}</span><span className="muted">of {k.total}</span></div>
+        <div className="kpi" data-okpi="complete" title="Open tasks with Person, Project, Status, Start and Due. Phase, Priority and Notes are optional."><span className="label">Planning data complete</span><span className="big-num">{k.completePct}%</span><span className="muted">{k.complete} of {k.open} open tasks</span><div className="progress thin"><i style={{ width: `${k.completePct}%` }} /></div></div>
       </div>
-    </div>, document.body)}
+    </section>
+    <section className="section">
+      <h2>Projects<span className="count">{cards.length}</span></h2>
+      <div className="projgrid">{cards.map(({ p, tasks, done, pct, health, phaseIndex, next }) => (
+        <button key={p.id} className="pcard ix" data-oproj={p.name} onClick={() => go('planner', { project: p.id })}>
+          <span className="pc-head"><span className="pc-name">{p.name}</span><span className={`hbadge ${health.key}`} title={health.why}><span aria-hidden="true">{health.icon}</span>{health.label}</span></span>
+          {phaseIndex >= 0 ? <span className="pc-phase"><span className="phase-steps" title={phaseLabel(p.phase_key)}>{PM_PHASES.map((x, i) => <i key={x.key} className={i < phaseIndex ? 'past' : i === phaseIndex ? 'cur' : ''} />)}</span><small>{phaseLabel(p.phase_key)}</small></span>
+            : <span className="pc-phase"><small className="muted">Phase not set</small></span>}
+          <span className="pc-prog"><span className="big-num">{pct}%</span><span className="muted">{done}/{tasks.length} done</span></span>
+          <StackBar tasks={tasks} label={p.name} />
+          <span className="pc-meta">{next ? <>Next: <b>{next.t.title}</b> · {I.person[next.t.person_id]?.name || '—'} · <span className={/late|Blocked/.test(next.why) ? 'late' : ''}>{next.why}</span></> : 'No open tasks with a due date'}</span>
+        </button>))}
+        {!cards.length && <p className="muted">No active projects. Add one in Settings → Projects &amp; phases.</p>}</div>
+      <StatusLegend />
+    </section>
+    <section className="section">
+      <h2>Needs attention<span className="count">{attn.length}</span></h2>
+      <div className="list">{attn.slice(0, 12).map((t) => <TaskListRow key={t.id} db={db} t={t} today={today} onOpen={openTask} showPerson />)}
+        {!attn.length && <p className="muted" style={{ padding: '16px 0' }}>Nothing blocked or late.</p>}</div>
+      {attn.length > 12 && <button className="btn ghost sm ix" style={{ marginTop: 12 }} onClick={() => go('planner', { attn: true })}>Show all {attn.length} in the Planner</button>}
+    </section>
   </>;
 }
 
-// ── Planner: Discipline → Person → editable task rows + compact Gantt ───────
-// Rows and bars are two views of the same rt_tasks record. Lists and dates save as soon as they
-// are chosen; text and hours save on Enter or when you leave the cell.
-const COLS_WIDE = [['project', 'Project', 100], ['title', 'Task', 176], ['phase', 'Phase', 118], ['start', 'Start', 66], ['due', 'Due', 82], ['hrs', 'Hrs/Wk', 54], ['status', 'Status', 98], ['priority', 'Priority', 74], ['notes', 'Notes', 116], ['menu', '', 46]];
-const COLS_NARROW = COLS_WIDE.filter(([k]) => k !== 'priority' && k !== 'notes');
-const INDENT = 44; const GAP = 4;
+// ── My tasks ────────────────────────────────────────────────────────────────
+function MyTasks({ db, today, me, openTask, setFlow }) {
+  const I = M.index(db); const p = I.person[me];
+  const { open, groups, needs, upToDate } = V.myTasks(db, me, today);
+  const pct = open.length ? Math.round((upToDate / open.length) * 100) : 100;
+  const late = open.filter((t) => M.isOverdue(t, today)).length; const bl = open.filter(M.isBlocked).length; const wk = open.filter((t) => M.isDueThisWeek(t, today)).length;
+  return <>
+    <section className="hero">
+      <div style={{ display: 'grid', gap: 6 }}>
+        <h1>{greet()}, {p.name.split(' ')[0]}</h1>
+        <p className="muted lead">{open.length ? (needs ? (needs === open.length ? `All ${open.length} of your tasks need a quick update.` : `${needs} of your ${open.length} tasks ${needs === 1 ? 'needs' : 'need'} a quick update.`) : 'Everything is up to date. Nice.') : 'You have no open tasks.'}</p>
+      </div>
+      <div className="cards">
+        <div className="card focus">
+          <div className="card-h"><span className="label">Up to date</span><b className="tnum">{upToDate} / {open.length}</b></div>
+          <div className="progress" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100"><i style={{ width: `${pct}%` }} /></div>
+          {open.length ? <button className="btn primary big ix" id="startCheck" onClick={() => setFlow({ kind: 'check' })}>{needs ? 'Start check-in' : 'Review my tasks'}<span className="sub">· about {Math.max(1, Math.round((open.length * 12) / 60))} min</span></button>
+            : <button className="btn primary big ix" onClick={() => setFlow({ kind: 'add' })}>Add a task</button>}
+          <small className="muted">Up to date = Status, Start and Due are filled in.</small>
+        </div>
+        <div className="card">
+          <span className="label">Right now</span>
+          <div className="mini-kpis"><div><b className={late ? 'red' : ''}>{late}</b><span>Late</span></div><div><b className={bl ? 'red' : ''}>{bl}</b><span>Blocked</span></div><div><b>{wk}</b><span>Due this week</span></div></div>
+        </div>
+      </div>
+    </section>
+    {groups.map(([g, list]) => <section key={g} className="section" data-group={g}><h2>{g}<span className="count">{list.length}</span></h2><div className="list">{list.map((t) => <TaskListRow key={t.id} db={db} t={t} today={today} onOpen={openTask} mine />)}</div></section>)}
+    <div className="addrow"><button className="btn ghost ix" id="addTask" onClick={() => setFlow({ kind: 'add' })}>＋ Add a task</button></div>
+  </>;
+}
+
+function WhoSheet({ db, me, pick, close }) {
+  const groups = M.disciplinesOf(db).map((d) => ({ d, ps: M.peopleOf(db, d.id) })).filter((x) => x.ps.length);
+  return <Modal close={close} label="Who are you?" wide><h3>Who are you?</h3><p className="muted small">This only chooses whose tasks appear under My tasks in this browser. It is not a login.</p>
+    <div className="whogrid">{groups.map(({ d, ps }) => <div key={d.id} className="whogroup"><span className="label">{d.name}</span><div className="names">{ps.map((p) => <button key={p.id} className="opt ix" data-me={p.name} aria-pressed={me === p.id} onClick={() => pick(p.id)}><span className="avatar">{initials(p.name)}</span>{p.name}</button>)}</div></div>)}</div>
+    {me && <button className="linkish small" onClick={() => pick(null)}>Clear my name</button>}</Modal>;
+}
+
+// Quick editor for one task (Overview, My tasks). Every change saves through the store.
+function TaskSheet({ store, db, today, id, close, say, go, setPanel }) {
+  const t = db.rt_tasks.find((x) => x.id === id);
+  const [note, setNote] = useState(t?.notes || '');
+  useEffect(() => { if (!t) close(); }, [!t]);
+  if (!t) return null;
+  const I = M.index(db); const dt = V.dueText(t, today);
+  const save = (patch) => say(store.saveTask({ ...t, ...patch }));
+  const saveNote = () => { if ((note || null) !== (t.notes || null)) save({ notes: note }); };
+  const showNote = t.status === 'Blocked' || t.status === 'Waiting' || t.notes;
+  return <Modal close={() => { saveNote(); close(); }} label={t.title}>
+    <div className="sheet-h"><span className="proj">{I.project[t.project_id]?.name}</span><h3>{t.title}</h3><span className="muted">{I.person[t.person_id]?.name} · <span className={dt.late ? 'late' : ''}>{dt.txt}</span></span></div>
+    <div className="field"><span className="label">How is it going?</span><div className="opts">{V.CHECKIN_ORDER.map((s) => <button key={s} className="opt ix" data-st={s} aria-pressed={t.status === s} onClick={() => save({ status: s })}><Dot s={s} />{s}</button>)}</div></div>
+    {showNote && <div className="field"><label className="label" htmlFor="noteIn">{t.status === 'Blocked' ? 'What are you blocked on?' : t.status === 'Waiting' ? 'What are you waiting on?' : 'Notes'}</label><textarea id="noteIn" value={note} placeholder="e.g. Waiting on structural to confirm truss depth" onChange={(e) => setNote(e.target.value)} onBlur={saveNote} /></div>}
+    <div className="field-2">
+      <div className="field"><span className="label">Start</span><DatePick label="Start" value={t.start_date} onPick={(v) => save({ start_date: v })} className={`cell dpbox ${t.start_date ? '' : 'miss'}`}>{t.start_date ? V.fmtDay(t.start_date) : 'Start not defined'}</DatePick></div>
+      <div className="field"><span className="label">Due</span><DatePick label="Due" value={t.due_date} onPick={(v) => save({ due_date: v })} className={`cell dpbox ${t.due_date ? (dt.late ? 'late' : '') : 'miss'}`}>{t.due_date ? V.fmtDay(t.due_date) : 'Due not defined'}</DatePick></div>
+    </div>
+    <div className="opts small-opts" aria-label="Quick due dates">{V.dueOptions(today).map((o) => <button key={o.label} className="opt ix" data-due={o.d} aria-pressed={t.due_date === o.d} onClick={() => save({ due_date: o.d })}>{o.label}</button>)}</div>
+    <div className="row-btns"><button className="btn primary ix" onClick={() => { saveNote(); close(); }}>Done</button><button className="btn ghost ix" onClick={() => { saveNote(); close(); setPanel({ kind: 'task', row: t }); }}>All details…</button><button className="btn ghost ix" onClick={() => { saveNote(); close(); go('planner', { person: t.person_id, q: t.title }); }}>Open in Planner</button></div>
+  </Modal>;
+}
+
+// ── Full-screen flows ───────────────────────────────────────────────────────
+function FlowShell({ pct, label, close, children, bar }) {
+  useEffect(() => { const f = (e) => { if (e.key === 'Escape') close(); }; window.addEventListener('keydown', f); return () => window.removeEventListener('keydown', f); }, []);
+  return <div className="flow" id="flow" role="dialog" aria-modal="true" aria-label={label}>
+    <div className="flow-top"><button className="iconbtn ix" id="fx" aria-label="Close" onClick={close}>×</button><div className="progress" role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin="0" aria-valuemax="100"><i style={{ width: `${pct}%` }} /></div></div>
+    <div className="flow-body"><div className="flow-inner">{children}</div></div>
+    <div className={`flow-bar ${bar.ok ? 'ok' : ''}`}><div className="in">{bar.html}</div></div></div>;
+}
+// Check-in: Status → (blocker / waiting note) → Start (if missing) → Due (if missing).
+function CheckIn({ store, db, me, today, close, say }) {
+  const [queue] = useState(() => V.checkinQueue(db, me).map((t) => t.id));
+  const [i, setI] = useState(0); const [step, setStep] = useState('status'); const [sel, setSel] = useState(null);
+  const [saved, setSaved] = useState(false); const [count, setCount] = useState(0); const [touched, setTouched] = useState({});
+  const noteRef = useRef(null); const goRef = useRef(null);
+  const ids = queue.filter((id) => db.rt_tasks.some((t) => t.id === id));
+  const t = db.rt_tasks.find((x) => x.id === ids[i]);
+  useEffect(() => { goRef.current?.focus(); }, [i, step, saved]);
+  if (i >= ids.length || !t) {
+    const open = db.rt_tasks.filter((x) => x.person_id === me && M.isActive(x)); const bl = open.filter(M.isBlocked).length; const comp = open.filter(V.isPlanningComplete).length;
+    return <FlowShell pct={100} label="Check-in" close={close} bar={{ ok: true, html: <><span /><button className="btn primary ix" id="fend" ref={goRef} onClick={close}>Back to my tasks</button></> }}>
+      <div className="done-screen"><div className="done-mark pop"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></div>
+        <p className="q">Check-in done</p><p className="muted lead">The team now sees an up-to-date picture.{bl ? ' They’ll see what’s blocking you.' : ''}</p>
+        <div className="stats"><div><div className="big-num">{count}</div><span className="muted">tasks updated</span></div><div><div className="big-num">{comp}/{open.length}</div><span className="muted">complete</span></div><div><div className="big-num" style={bl ? { color: 'var(--s-stuck)' } : null}>{bl}</div><span className="muted">blocked</span></div></div></div>
+    </FlowShell>;
+  }
+  const I = M.index(db);
+  const pct = ((i + (saved ? 1 : 0)) / ids.length) * 100;
+  const head = <div className="flow-task"><span className="label">Task {i + 1} of {ids.length} · {I.project[t.project_id]?.name}</span><span className="t">{t.title}</span></div>;
+  const nextTask = () => { setI(i + 1); setStep('status'); setSel(null); setSaved(false); setTouched({}); };
+  if (saved) {
+    const dt = V.dueText(t, today);
+    return <FlowShell pct={pct} label="Check-in" close={close} bar={{ ok: true, html: <><span className="msg"><span className="check pop" aria-hidden="true">✓</span>Saved</span><button className="btn primary ix" id="fnext" ref={goRef} onClick={nextTask}>{i + 1 < ids.length ? 'Next task' : 'Finish'}</button></> }}>
+      {head}<div className="choice static" aria-live="polite"><Dot s={t.status} /><span>{stLabel(t.status)}<small>{t.status !== 'Done' ? `${t.start_date ? `Starts ${V.fmtDay(t.start_date)}` : 'Start not defined'} · ${dt.txt}` : 'Moved to Done'}</small></span></div>
+    </FlowShell>;
+  }
+  const status = step === 'status' && sel != null ? sel : t.status;
+  const advance = (skipped) => {
+    let patch = null;
+    if (!skipped) {
+      if (step === 'status' && sel != null) patch = { status: sel };
+      else if (step === 'note') patch = { notes: noteRef.current?.value ?? t.notes };
+      else if (step === 'start' && sel != null) patch = { start_date: sel };
+      else if (step === 'due' && sel != null) patch = { due_date: sel };
+    }
+    if (patch && !say(store.saveTask({ ...t, ...patch }))) return;
+    const t2 = patch ? { ...t, ...patch } : t;
+    const tch = step === 'start' || step === 'due' ? { ...touched, [step]: true } : touched;
+    const next = V.checkinSteps(t2, t2.status, tch); const idx = next.indexOf(step);
+    setTouched(tch); setSel(null);
+    if (idx >= 0 && idx < next.length - 1) setStep(next[idx + 1]);
+    else { setSaved(true); setCount(count + 1); }
+  };
+  let body; let canGo = true; let skip = false;
+  if (step === 'status') {
+    body = <><p className="q">How is it going?</p><div className="choices">{V.CHECKIN_ORDER.map((s) => <button key={s} className="choice ix" data-v={s} aria-pressed={status === s} onClick={() => setSel(s)}><Dot s={s} /><span>{s}<small>{V.ST_HINT[s]}</small></span></button>)}</div></>;
+    canGo = status != null;
+  } else if (step === 'note') {
+    body = <><p className="q">What are you {t.status === 'Blocked' ? 'blocked' : 'waiting'} on?</p><textarea id="fnote" ref={noteRef} defaultValue={t.notes || ''} placeholder="e.g. Waiting on Kiran for the MEP room layout" /></>; skip = true;
+  } else {
+    const isStart = step === 'start'; const cur = sel ?? (isStart ? t.start_date : t.due_date);
+    const opts = isStart ? V.startOptions(today) : V.dueOptions(today);
+    body = <><p className="q">{isStart ? 'When does it start?' : 'When should it be done?'}</p>
+      {!isStart && t.start_date && <p className="muted">Starts {V.fmtDay(t.start_date)}</p>}
+      <div className="choices grid">{opts.map((o) => <button key={o.label} className="choice ix" data-v={o.d} aria-pressed={cur === o.d} onClick={() => setSel(o.d)}>{o.label}<small>{V.fmtDay(o.d)}</small></button>)}</div>
+      <div className="pick-line"><span className="muted">Or pick a date</span><DatePick label={isStart ? 'Start' : 'Due'} value={cur} onPick={(v) => setSel(v)} className="cell dpbox">{cur ? V.fmtDay(cur) : 'Choose a date'}</DatePick></div></>;
+    canGo = cur != null; skip = true;
+  }
+  return <FlowShell pct={pct} label="Check-in" close={close} bar={{ html: <>{skip ? <button className="btn ghost ix" id="fskip" onClick={() => advance(true)}>Skip</button> : <span />}<button className="btn primary ix" id="fgo" ref={goRef} disabled={!canGo} onClick={() => advance(false)}>Continue</button></> }}>{head}{body}</FlowShell>;
+}
+// Add a task (My tasks): name → project → people → start (optional) → due (optional). One task per person.
+function AddTaskFlow({ store, db, today, me, close, say }) {
+  const [st, setSt] = useState(0); const [d, setD] = useState({ title: '', project: '', people: me ? [me] : [], start: null, due: null });
+  const steps = ['title', 'project', 'people', 'start', 'due']; const s = steps[st];
+  const groups = M.disciplinesOf(db).map((x) => ({ x, ps: M.peopleOf(db, x.id) })).filter((g) => g.ps.length);
+  const next = (nd = d) => {
+    if (st < steps.length - 1) { setSt(st + 1); return; }
+    if (nd.start && nd.due && nd.due < nd.start) { say({ ok: false, error: 'Due date is before the start date.' }); return; }
+    const res = nd.people.map((pid) => store.saveTask({ person_id: pid, project_id: nd.project, title: nd.title, start_date: nd.start, due_date: nd.due, status: 'Not Started' }));
+    const bad = res.find((r) => !r.ok); if (bad) { say(bad); return; }
+    say({ ok: true }, `Task added for ${nd.people.map((id) => M.index(db).person[id]?.name).join(', ')}`); close();
+  };
+  let body; let canGo = true; let skip = false;
+  if (s === 'title') { body = <><p className="q">What needs to be done?</p><input type="text" id="atitle" autoFocus value={d.title} maxLength={160} placeholder="e.g. Update window schedule" onChange={(e) => setD({ ...d, title: e.target.value })} onKeyDown={(e) => { if (e.key === 'Enter' && d.title.trim()) next(); }} /></>; canGo = !!d.title.trim(); }
+  if (s === 'project') { body = <><p className="q">Which project?</p><div className="choices">{M.activeProjects(db).map((p) => <button key={p.id} className="choice ix" data-v={p.name} aria-pressed={d.project === p.id} onClick={() => setD({ ...d, project: p.id })}>{p.name}</button>)}</div></>; canGo = !!d.project; }
+  if (s === 'people') { body = <><p className="q">Who’s working on it?</p>{groups.map(({ x, ps }) => <div key={x.id} className="whogroup"><span className="label">{x.name}</span><div className="opts">{ps.map((p) => <button key={p.id} className="opt ix" data-p={p.name} aria-pressed={d.people.includes(p.id)} onClick={() => setD({ ...d, people: d.people.includes(p.id) ? d.people.filter((y) => y !== p.id) : [...d.people, p.id] })}><span className="avatar">{initials(p.name)}</span>{p.name}</button>)}</div></div>)}</>; canGo = d.people.length > 0; }
+  if (s === 'start' || s === 'due') {
+    const opts = s === 'start' ? V.startOptions(today) : V.dueOptions(today);
+    body = <><p className="q">{s === 'start' ? 'When does it start?' : 'When should it be done?'}</p><div className="choices grid">{opts.map((o) => <button key={o.label} className="choice ix" data-v={o.d} aria-pressed={d[s] === o.d} onClick={() => setD({ ...d, [s]: o.d })}>{o.label}<small>{V.fmtDay(o.d)}</small></button>)}</div>
+      <div className="pick-line"><span className="muted">Or pick a date</span><DatePick label={s === 'start' ? 'Start' : 'Due'} value={d[s]} onPick={(v) => setD({ ...d, [s]: v })} className="cell dpbox">{d[s] ? V.fmtDay(d[s]) : 'Choose a date'}</DatePick></div></>;
+    canGo = !!d[s]; skip = true;
+  }
+  const doSkip = () => { const nd = { ...d, [s]: null }; setD(nd); next(nd); };
+  return <FlowShell pct={(st / steps.length) * 100} label="Add a task" close={close} bar={{ html: <>{st ? <button className="btn ghost ix" id="fback" onClick={() => setSt(st - 1)}>Back</button> : <span />}<span className="row-btns">{skip && <button className="btn ghost ix" id="fskip" onClick={doSkip}>Skip</button>}<button className="btn primary ix" id="fgo" disabled={!canGo} onClick={() => next()}>{st === steps.length - 1 ? 'Add task' : 'Continue'}</button></span></> }}>
+    <span className="label">New task · step {st + 1} of {steps.length}</span>{body}</FlowShell>;
+}
+
+// ── Planner: Discipline → Person → Task table with an integrated Gantt ──────
+// Lists and dates save when chosen; text saves on Enter or when you leave the cell.
+// Gantt: drag a bar to move it, drag its ends to change Start / Due, drag across an empty
+// timeline to set dates. Every change goes through store.saveTask (validated, then Supabase).
+const COLS_FULL = [['project', 'Project', 128], ['title', 'Task', 232], ['phase', 'Phase', 150], ['start', 'Start', 96], ['due', 'Due', 108], ['status', 'Status', 124], ['priority', 'Priority', 96], ['notes', 'Notes', 180], ['menu', '', 44]];
+const COLS_COMPACT = COLS_FULL.filter(([k]) => ['project', 'title', 'start', 'due', 'status', 'menu'].includes(k));
+// hours_per_week is not shown in V1 but is carried through unchanged, so editing a row never clears a stored value.
 const fromT = (t) => ({ project_id: t.project_id || '', title: t.title || '', phase_key: t.phase_key || '', start_date: t.start_date || '', due_date: t.due_date || '', hours_per_week: t.hours_per_week == null ? '' : String(t.hours_per_week), status: t.status || '', priority: t.priority || '', notes: t.notes || '' });
 const valOf = (f) => ({ ...f, phase_key: f.phase_key || null, start_date: f.start_date || null, due_date: f.due_date || null, hours_per_week: f.hours_per_week === '' ? null : +f.hours_per_week, status: f.status || null, priority: f.priority || null, notes: f.notes || null });
-
-function Planner({ store, db, setPanel, say, setConfirm, vs, setVs, setF }) {
-  const today = todayISO();
-  const [tip, , tipFor] = useTip();
-  const [drafts, setDrafts] = useState({}); // personId → [{ key, id? }] rows added in this session
-  const filt = { ...vs.f, mode: vs.mode };
-  const filtering = H.taskFiltering(filt);
-  const tree = H.buildTree(db, today, filt);
-  const O = useOpen(filtering, JSON.stringify(filt), 'planner');
-  const I = M.index(db);
-  const [gridRef, gw] = useWidth();
-  const cols = !gw || gw >= 1240 ? COLS_WIDE : COLS_NARROW;
-  const tpl = cols.map((c) => `${c[2]}px`).join(' ');
-  const L = INDENT + cols.reduce((s, c) => s + c[2], 0) + GAP * (cols.length - 1) + 10;
-  const sticky = !gw || gw >= 860;
-  const g = { ...geometry(vs, gw && sticky ? gw - L - 2 : 0, vs.range === 4 ? 96 : vs.range === 8 ? 48 : 34), L };
-  const addTask = (p) => { O.setOne(p.discipline_id, true); O.setOne(p.id, true); setDrafts((d) => ({ ...d, [p.id]: [...(d[p.id] || []), { key: `new-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}` }] })); };
-  const onCreated = (pid, key, id) => setDrafts((d) => ({ ...d, [pid]: d[pid].map((r) => (r.key === key ? { ...r, id } : r)) }));
-  const onCancel = (pid, key) => setDrafts((d) => ({ ...d, [pid]: d[pid].filter((r) => r.key !== key) }));
-  const ctx = { store, db, say, setConfirm, setPanel };
-  const row = (cls, left, right) => <div className={`rt-row ${cls}`} style={{ width: L + g.W }}>{left}<div className="rt-r rg-track" style={{ width: g.W }}><GBg g={g} />{right}</div></div>;
-  return (
-    <div className="rt-planner">
-      <KpiStrip db={db} vs={vs} setF={setF} />
-      <div className="rt-toolbar">
-        <RangeBar vs={vs} setVs={setVs} g={g} />
-        <span className="grow" />
-        <button className="btn sm" onClick={() => O.setAll(tree, true)}>Expand All</button>
-        <button className="btn sm" onClick={() => O.setAll(tree, false)}>Collapse All</button>
-        <select className="btn primary sm rt-addsel" aria-label="Add task for a person" value="" onChange={(e) => { const p = I.person[e.target.value]; if (p) addTask(p); }}>
-          <option value="">+ Add Task for…</option>
-          {M.disciplinesOf(db).map((d) => { const ps = M.peopleOf(db, d.id); return ps.length ? <optgroup key={d.id} label={d.name}>{ps.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup> : null; })}
-        </select>
-      </div>
-      <FilterBar db={db} vs={vs} setF={setF} setVs={setVs} />
-      <div className={`rt-grid rt-pgrid rg ${sticky ? '' : 'nosticky'}`} ref={gridRef} role="treegrid" aria-label="Resource planner" style={{ '--l': `${L}px` }}>
-        <div className="rt-row rt-hdr rg-hdr" style={{ width: L + g.W }}>
-          <div className="rt-l rt-cells rt-hcols" style={{ gridTemplateColumns: tpl, columnGap: GAP, paddingLeft: INDENT }}>{cols.map(([k, l]) => <span key={k} className={`c-${k}`}>{l}</span>)}</div>
-          <div className="rt-r rg-hr" style={{ width: g.W }}><GHeader g={g} /></div>
-        </div>
-        {!tree.length && row('', <div className="rt-l muted small">Nothing matches these filters.</div>)}
-        {tree.map(({ d, stats, people: ppl }) => {
-          const dOpen = O.isOpen(d.id);
-          return (
-            <div key={d.id} className={`rt-disc ${d.kind === 'management' ? 'mgmt' : ''} ${dOpen ? 'open' : ''}`} data-name={d.name}>
-              {row('rt-drow', <div className="rt-l"><button className="rt-dhead" aria-expanded={dOpen} aria-label={`${dOpen ? 'Collapse' : 'Expand'} ${d.name}`} onClick={() => O.toggle(d.id)}><Chev open={dOpen} />
-                <span className="rt-dtext"><span className="rt-dname">{d.name}</span><DiscRollup s={stats} /></span></button></div>)}
-              {dOpen && !ppl.length && row('rt-empty', <div className="rt-l">No people yet</div>)}
-              {dOpen && ppl.map(({ p, stats: ps, tasks }) => {
-                const pOpen = O.isOpen(p.id);
-                const mine = drafts[p.id] || [];
-                const pinned = new Set(mine.filter((r) => r.id).map((r) => r.id));
-                const lines = [...tasks.filter((t) => !pinned.has(t.id)).map((t) => ({ key: t.id, t })),
-                  ...mine.map((r) => (r.id ? (I.task[r.id] && (!filtering || tasks.some((t) => t.id === r.id)) ? { key: r.key, t: I.task[r.id], r } : null) : { key: r.key, t: { person_id: p.id, project_id: vs.f.project || '', phase_key: vs.f.phase && vs.f.phase !== '-' ? vs.f.phase : '' }, r })).filter(Boolean)];
-                return (
-                  <div key={p.id} className={`rt-person ${p.active ? '' : 'inactive'}`} data-name={p.name}>
-                    {row('rt-prow', <div className="rt-l"><button className="rt-phead" aria-expanded={pOpen} aria-label={`${pOpen ? 'Collapse' : 'Expand'} ${p.name}`} onClick={() => O.toggle(p.id)}><Chev open={pOpen} />
-                      <span className="rt-dtext"><span className="rt-pname">{p.name}{!p.active && <span className="muted"> (inactive)</span>}<PersonHead s={ps} /></span><PersonIssues s={ps} /></span></button></div>,
-                      <LoadMarks db={db} pid={p.id} g={g} />)}
-                    {pOpen && <>
-                      {lines.map(({ key, t, r }) => <TaskLine key={key} ctx={ctx} t={t} personId={p.id} cols={cols} tpl={tpl} g={g} tipFor={tipFor} why={vs.mode === 'attention'} om={ps.om} autoFocus={!!r && !r.id}
-                        onCreated={(id) => onCreated(p.id, key, id)} onCancel={() => onCancel(p.id, key)} />)}
-                      {p.active ? row('rt-add', <div className="rt-l"><button className="linkish rt-addbtn" onClick={() => addTask(p)}>+ Add Task</button>{!lines.length && <span className="muted small"> · no tasks yet</span>}</div>)
-                        : !lines.length && row('rt-add', <div className="rt-l muted small">No tasks</div>)}
-                    </>}
-                  </div>);
-              })}
-            </div>);
-        })}
-      </div>
-      <Legend extra="Edit any cell: lists and dates save when chosen; text and hours save on Enter or when you leave the cell. Esc cancels." />
-      {tip && <TaskTip db={db} t={tip.t} today={today} pos={tip} />}
-    </div>
-  );
+const OPEN_CACHE = {};
+function useOpen(filtering, resetKey) {
+  const [open, setOpenRaw] = useState(() => (OPEN_CACHE.key === resetKey ? OPEN_CACHE.open : {}));
+  const first = useRef(true);
+  useEffect(() => { if (first.current) { first.current = false; return; } setOpenRaw({}); }, [resetKey]);
+  useEffect(() => { OPEN_CACHE.key = resetKey; OPEN_CACHE.open = open; }, [open, resetKey]);
+  return {
+    isOpen: (id) => (id in open ? open[id] : filtering),
+    toggle: (id) => setOpenRaw((o) => ({ ...o, [id]: !(id in o ? o[id] : filtering) })),
+    setOne: (id, v) => setOpenRaw((o) => ({ ...o, [id]: v })),
+    setAll: (tree, v) => setOpenRaw(Object.fromEntries(tree.flatMap(({ d, people }) => [[d.id, v], ...people.map(({ p }) => [p.id, v])]))),
+  };
 }
-const Legend = ({ extra }) => <div className="rt-legend" aria-label="Legend">
-  <span><i className="lg b-inprogress" /> In Progress</span><span><i className="lg b-notstarted" /> Not Started / not set</span><span><i className="lg b-waiting" /> Waiting</span>
-  <span><i className="lg b-blocked" /> ⚠︎ Blocked</span><span><i className="lg b-done" /> Done</span><span><i className="lg ovx" /> Overdue (Due → Today)</span>
-  <span><i className="lg-due">◆</i> Due only · Start not defined</span><span><i className="lg-start">▶</i> Start only · Due not defined</span><span><i className="lg-today" /> Today</span>
-  <span>Load: % of weekly capacity · <b>▲</b> over capacity · <b>?</b> tasks without Hrs/Wk</span>
-  {extra && <span className="muted">{extra}</span>}
-</div>;
+// State label beside a task bar.
+function tagOf(t, today) {
+  const od = M.overdueDays(t, today);
+  if (M.isBlocked(t)) return ['bl', `⚠ Blocked${od ? ` · ${od}d overdue` : ''}`];
+  if (od) return ['od', `${od}d overdue`];
+  if (t.status === 'Done') return ['dn', '✓ Done'];
+  if (t.due_date && M.isActive(t)) { const k = M.daysBetween(today, t.due_date); if (k >= 0 && k <= 3) return ['ds', k === 0 ? 'Due today' : k === 1 ? 'Due tomorrow' : `Due in ${k}d`]; }
+  if (t.status === 'Waiting') return ['wt', 'Waiting'];
+  return null;
+}
+const Lbl = ({ tag, a, b }) => (!tag ? null : b < 78 ? <span className={`glbl ${tag[0]}`} style={{ left: `calc(${b}% + 6px)` }}>{tag[1]}</span> : a > 22 ? <span className={`glbl ${tag[0]}`} style={{ right: `calc(${100 - a}% + 6px)` }}>{tag[1]}</span> : null);
+const todayX = (g, today) => (today >= g.r0 && today < g.r1 ? V.pctOf(g, today) + 50 / g.span : null);
+function NowLayer({ g, today }) {
+  const ws = M.weekStart(today); const L = V.pctOf(g, ws); const R = V.pctOf(g, M.addDays(ws, 7)); const tx = todayX(g, today);
+  return <>{R > L && <i className="gnow" style={{ left: `${L}%`, width: `${R - L}%` }} />}{tx != null && <i className="gtoday" style={{ left: `${tx}%` }} />}</>;
+}
+function TaskMarks({ t, g, today, tip }) {
+  const s0 = t.start_date; const d = t.due_date; const lt = M.isOverdue(t, today); const tag = tagOf(t, today);
+  const tx = todayX(g, today); const tEnd = tx ?? (today >= g.r1 ? 100 : 0);
+  const cls = `seg-${V.stKey(t.status)} ${lt ? 'late' : ''}`;
+  const over = (from) => (lt && tEnd > from ? <span className="gover" style={{ left: `${from}%`, width: `${tEnd - from}%` }} /> : null);
+  const P = (x) => V.pctOf(g, x);
+  if (s0 && d) {
+    if (d < g.r0 || s0 >= g.r1) return lt && d < g.r0 && today >= g.r0 ? <>{over(0)}<Lbl tag={tag} a={0} b={tEnd} /></> : <span className={`tl-edge ${d < g.r0 ? '' : 'r'}`}>{d < g.r0 ? `◂ ended ${M.fmtD(d)}` : `starts ${M.fmtD(s0)} ▸`}</span>;
+    const L = P(s0); const R = P(M.addDays(d, 1));
+    return <><span className={`gbar ${cls}`} data-drag-id={t.id} data-mode="move" style={{ left: `${L}%`, width: `${Math.max(1.2, R - L)}%` }} data-tip={tip}><i className="h h-l" data-mode="start" /><i className="h h-r" data-mode="end" /></span>{over(R)}<Lbl tag={tag} a={L} b={lt ? Math.max(R, tEnd) : R} /></>;
+  }
+  if (d) {
+    if (d >= g.r1) return <span className="tl-edge r">due {M.fmtD(d)} ▸</span>;
+    if (d < g.r0) return lt && today >= g.r0 ? <>{over(0)}<Lbl tag={tag} a={0} b={tEnd} /></> : <span className="tl-edge">◂ due {M.fmtD(d)}</span>;
+    const X = P(d) + 50 / g.span; const R = P(M.addDays(d, 1));
+    return <><span className={`gdia ${cls}`} data-drag-id={t.id} data-mode="due" style={{ left: `calc(${X}% - 7px)` }} data-tip={tip} />{over(R)}<Lbl tag={tag} a={X - 1} b={lt ? Math.max(R, tEnd) : X + 1} /></>;
+  }
+  if (s0) { if (s0 >= g.r1) return <span className="tl-edge r">starts {M.fmtD(s0)} ▸</span>; const L = P(s0); return <span className={`gbar open-end ${cls}`} data-drag-id={t.id} data-mode="move" style={{ left: `${L}%`, width: `${100 - L}%` }} data-tip={tip}><i className="h h-l" data-mode="start" /></span>; }
+  return <span className="tl-none">No dates · drag to set</span>;
+}
+// Discipline / person summary line: every task in its status colour, most urgent on top.
+function SumMarks({ tasks, g, today, I }) {
+  const P = (x) => V.pctOf(g, x); const tx = todayX(g, today); const tEnd = tx ?? (today >= g.r1 ? 100 : 0);
+  const marks = V.summaryOrder(tasks, today).map(({ t, late }) => {
+    const s0 = t.start_date; const d = t.due_date; const c = `seg-${V.stKey(t.status)} ${late ? 'late' : ''} ${t.status === 'Done' ? 'dn' : ''}`;
+    const tip = `${t.title} · ${I.project[t.project_id]?.name || '—'} · ${I.person[t.person_id]?.name || '—'} · ${stLabel(t.status)}${late ? ` · ${M.overdueDays(t, today)}d overdue` : ''}`;
+    if (s0 && d) { if (d < g.r0 || s0 >= g.r1) return null; const L = P(s0); const R = P(M.addDays(d, 1)); return <span key={t.id} className={`smk ${c}`} style={{ left: `${L}%`, width: `${Math.max(0.8, R - L)}%` }} data-tip={tip} />; }
+    if (d) { if (d < g.r0 || d >= g.r1) return null; return <span key={t.id} className={`smd ${c}`} style={{ left: `calc(${P(d) + 50 / g.span}% - 5px)` }} data-tip={tip} />; }
+    if (s0 < g.r1) { const L = P(s0); return <span key={t.id} className={`smk open-end ${c}`} style={{ left: `${L}%`, width: `${100 - L}%` }} data-tip={tip} />; }
+    return null;
+  });
+  const late = tasks.filter((t) => M.isOverdue(t, today));
+  let ov = null;
+  if (late.length) { const first = late.map((t) => t.due_date).sort()[0]; const from = first < g.r0 ? 0 : P(M.addDays(first, 1)); if (tEnd > from) ov = <span className="sover" style={{ left: `${from}%`, width: `${tEnd - from}%` }} />; }
+  const open = tasks.filter(M.isActive); const bl = open.filter(M.isBlocked).length;
+  const ds = open.filter((t) => !M.isOverdue(t, today) && t.due_date && M.daysBetween(today, t.due_date) >= 0 && M.daysBetween(today, t.due_date) <= 3).length;
+  const parts = [bl ? <b key="b" className="bl">⚠ {bl} blocked</b> : null, late.length ? <b key="o" className="od">{late.length} overdue</b> : null, ds ? <b key="d" className="ds">{ds} due soon</b> : null].filter(Boolean);
+  let lab = null;
+  if (parts.length) {
+    const ends = tasks.map((t) => (t.due_date && t.due_date >= g.r0 && t.due_date < g.r1 ? P(M.addDays(t.due_date, 1)) : t.start_date && !t.due_date && t.start_date < g.r1 ? 100 : 0));
+    const last = Math.max(tEnd, ...ends);
+    const content = parts.flatMap((x, k) => (k ? [<i key={`s${k}`}>·</i>, x] : [x]));
+    lab = last < 70 ? <span className="slbl" style={{ left: `calc(${last}% + 8px)` }}>{content}</span> : <span className="slbl" style={{ right: 6 }}>{content}</span>;
+  }
+  return <>{ov}{marks}{lab}</>;
+}
 
-function TaskLine({ ctx, t, personId, cols, tpl, g, tipFor, why, om, autoFocus, onCreated, onCancel }) {
-  const { store, db, say, setConfirm, setPanel } = ctx;
+function Planner({ store, db, today, ui, setUi, say, setConfirm, setPanel }) {
+  const f = ui.f; const W = ui.weeks; const details = ui.details;
+  const setF = (p) => setUi((x) => ({ f: { ...x.f, ...p } }));
+  const g = V.ganttRange(today, ui.off, W);
+  const filtering = V.plannerFiltering(f);
+  const tree = V.plannerTree(db, today, f);
+  const kc = V.plannerKpis(db, today, f);
+  const I = M.index(db);
+  const O = useOpen(filtering, JSON.stringify(f));
+  const [drafts, setDrafts] = useState({}); // personId → [{ key, init, id? }] rows added in this session
+  const [picker, setPicker] = useState(false);
+  const cols = details ? COLS_FULL : COLS_COMPACT; const NC = cols.length;
+  const leftW = cols.reduce((s, c) => s + c[2], 0); const tlW = W * (W === 4 ? 150 : W === 8 ? 80 : 60);
+  const tableRef = useRef(null); const dragTip = useRef(null); const DR = useRef(null);
+  const discs = M.disciplinesOf(db);
+  const addDraft = (p, init = {}) => {
+    if (!p?.active) return;
+    const reset = {}; if (f.person && f.person !== p.id) reset.person = ''; if (f.disc && f.disc !== p.discipline_id) reset.disc = '';
+    if (f.q || f.kpi || f.attn || f.status || f.priority) Object.assign(reset, { q: '', kpi: '', attn: false, status: '', priority: '' });
+    if (Object.keys(reset).length) setF(reset);
+    setTimeout(() => { O.setOne(p.discipline_id, true); O.setOne(p.id, true); }, 0);
+    setDrafts((dd) => ({ ...dd, [p.id]: [...(dd[p.id] || []), { key: `new-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, init: { person_id: p.id, project_id: f.project || '', phase_key: f.phase && f.phase !== '-' ? f.phase : '', ...init } }] }));
+  };
+  const onCreated = (pid, key, id) => setDrafts((dd) => ({ ...dd, [pid]: dd[pid].map((r) => (r.key === key ? { ...r, id } : r)) }));
+  const onCancel = (pid, key) => setDrafts((dd) => ({ ...dd, [pid]: dd[pid].filter((r) => r.key !== key) }));
+
+  // Gantt drag: move / resize / set dates. Painted directly while dragging, saved once on release.
+  useEffect(() => {
+    const idx = (iso) => M.daysBetween(g.r0, iso);
+    const paint = (D, a, b) => {
+      const s = M.addDays(g.r0, a); const e = M.addDays(g.r0, b);
+      if (D.mode === 'due') D.el.style.left = `calc(${V.pctOf(g, e) + 50 / g.span}% - 7px)`;
+      else { D.el.style.left = `${V.pctOf(g, s)}%`; D.el.style.width = `${Math.max(1.2, V.pctOf(g, M.addDays(e, 1)) - V.pctOf(g, s))}%`; }
+      const tip = dragTip.current; tip.hidden = false; tip.textContent = D.mode === 'due' ? `Due ${V.fmtDay(e)}` : `${V.fmtDay(s)} → ${V.fmtDay(e)} · ${b - a + 1} days`;
+    };
+    const move = (e) => {
+      const D = DR.current; if (!D) return;
+      const d = D.dayAt(e.clientX); const delta = d - D.d0; if (Math.abs(e.clientX - D.x0) > 4) D.moved = true; if (!D.moved) return;
+      if (D.mode === 'create') { D.a = Math.min(D.d0, d); D.b = Math.max(D.d0, d); }
+      else { const nd = V.dragDates(D.mode, D.t, delta); D.dates = nd; D.b = nd.due_date ? idx(nd.due_date) : D.span - 1; D.a = D.mode === 'due' ? D.b : (nd.start_date ? idx(nd.start_date) : D.b); }
+      paint(D, D.a, D.b);
+      const tip = dragTip.current; const r = tip.getBoundingClientRect(); tip.style.left = `${Math.min(e.clientX + 12, window.innerWidth - r.width - 8)}px`; tip.style.top = `${Math.max(8, e.clientY - r.height - 14)}px`;
+    };
+    const up = () => {
+      const D = DR.current; if (!D) return; DR.current = null; window.__rtDrag = false; dragTip.current.hidden = true; D.ghost?.remove();
+      if (!D.moved) { if (D.t) tableRef.current?.querySelector(`[data-row="${D.t.id}"] .c-title input`)?.focus(); return; }
+      if (D.mode === 'create') {
+        const range = V.createRange(M.addDays(g.r0, D.a), M.addDays(g.r0, D.b));
+        if (D.setId) { const t = I.task[D.setId]; if (t) say(store.saveTask({ ...t, ...range }), `Dates set: ${V.fmtDay(range.start_date)} → ${V.fmtDay(range.due_date)}`); }
+        else if (D.person) addDraft(D.person, range);
+        return;
+      }
+      if (!D.dates) return;
+      say(store.saveTask({ ...D.t, ...D.dates }), `${D.t.title}: ${D.dates.start_date ? M.fmtD(D.dates.start_date) : 'no start'} → ${D.dates.due_date ? M.fmtD(D.dates.due_date) : 'no due'}`);
+    };
+    document.addEventListener('pointermove', move); document.addEventListener('pointerup', up); document.addEventListener('pointercancel', up);
+    return () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up); document.removeEventListener('pointercancel', up); };
+  });
+  const onPointerDown = (e) => {
+    const tl = e.target.closest('.tl'); if (!tl || e.button !== 0) return;
+    const rect = tl.getBoundingClientRect(); const span = g.span;
+    const dayAt = (x) => Math.max(0, Math.min(span - 1, Math.floor(((x - rect.left) / rect.width) * span)));
+    const mark = e.target.closest('[data-drag-id]');
+    let D = null;
+    if (mark) { const t = I.task[mark.dataset.dragId]; if (!t) return; D = { mode: e.target.dataset.mode || mark.dataset.mode, t, el: mark }; }
+    else if (tl.dataset.tlset || tl.dataset.tladd) {
+      const ghost = document.createElement('span'); ghost.className = 'gbar ghost'; tl.appendChild(ghost);
+      D = { mode: 'create', el: ghost, ghost, setId: tl.dataset.tlset, person: tl.dataset.tladd ? I.person[tl.dataset.tladd] : null };
+    } else return;
+    Object.assign(D, { dayAt, x0: e.clientX, d0: dayAt(e.clientX), moved: false, span });
+    DR.current = D; window.__rtDrag = true; e.preventDefault();
+  };
+
+  const openCount = (d) => db.rt_tasks.filter((t) => t.active !== false && M.isActive(t) && I.person[t.person_id]?.discipline_id === d.id).length;
+  const attnBad = db.rt_tasks.filter((t) => t.active !== false && (M.isBlocked(t) || M.isOverdue(t, today))).length;
+  const nMore = [f.person, f.project, f.phase, f.status, f.priority].filter(Boolean).length;
+  const anyFilter = filtering || f.disc || f.person;
+  const peopleOpts = M.sortBy(db.rt_people.filter((p) => !f.disc || p.discipline_id === f.disc));
+  const ctx = { store, db, today, say, setConfirm, setPanel, cols, g, attnMode: f.attn, I };
+  return <div className="planner">
+    <section className="hero plan-hero"><h1>Planner</h1></section>
+    <div className="pkpis" role="group" aria-label="Key figures — click to filter">{V.PLANNER_KPIS.map(([k, l, c]) => <button key={k} className={`pkpi ix ${kc[k] ? c : 'zero'}`} data-kpi={k} aria-pressed={f.kpi === k} title={`${V.KPI_HELP[k]} ${f.kpi === k ? 'Click to clear.' : 'Click to show only these.'}`} onClick={() => setF({ kpi: f.kpi === k ? '' : k })}><b>{kc[k]}</b><span>{l}</span></button>)}</div>
+    <div className="chips dchips" role="group" aria-label="Discipline"><button className="chip ix" data-pdisc="" aria-pressed={!f.disc} onClick={() => setF({ disc: '', person: '' })}>All disciplines</button>
+      {discs.map((d) => <button key={d.id} className="chip ix" data-pdisc={d.name} aria-pressed={f.disc === d.id} onClick={() => { setF({ disc: d.id, person: f.person && I.person[f.person]?.discipline_id !== d.id ? '' : f.person }); setTimeout(() => O.setOne(d.id, true), 0); }}>{d.name}<span className="cc">{openCount(d)}</span></button>)}</div>
+    <div className="pfilters">
+      <div className="seg" role="group" aria-label="Show"><button className="ix" data-attn="0" aria-pressed={!f.attn} onClick={() => setF({ attn: false })}>All</button><button className="ix" data-attn="1" aria-pressed={!!f.attn} onClick={() => setF({ attn: true })}>Attention{attnBad ? <span className="badge">{attnBad}</span> : null}</button></div>
+      <input type="search" id="pfq" placeholder="Search" value={f.q} aria-label="Search project, task, person, notes" onChange={(e) => setF({ q: e.target.value })} />
+      <button className="chip ix" data-pmore aria-pressed={!!ui.more} aria-expanded={!!ui.more} onClick={() => setUi({ more: !ui.more })}>Filters{nMore ? ` · ${nMore}` : ''} ▾</button>
+      {anyFilter && <button className="btn ghost ix sm" id="pfclear" onClick={() => setUi({ f: { ...EMPTY_F } })}>Clear</button>}
+      <span className="pf-right">
+        <div className="seg" role="group" aria-label="Move timeline"><button className="ix" aria-label="Earlier" onClick={() => setUi({ off: ui.off - Math.max(1, W / 2) })}>‹</button><button className="ix" aria-pressed={ui.off === 0} onClick={() => setUi({ off: 0 })}>Today</button><button className="ix" aria-label="Later" onClick={() => setUi({ off: ui.off + Math.max(1, W / 2) })}>›</button></div>
+        <div className="seg" role="group" aria-label="Weeks shown">{[4, 8, 12].map((w) => <button key={w} className="ix" data-pweeks={w} aria-pressed={W === w} onClick={() => setUi({ weeks: w })}>{w}w</button>)}</div>
+        <button className="chip ix" data-pdetails aria-pressed={details} onClick={() => setUi({ details: !details })} title="Show every field: Phase, Priority and Notes">Details</button>
+        <div className="seg" role="group" aria-label="Expand or collapse"><button className="ix" id="expAll" onClick={() => O.setAll(tree, true)}>Expand all</button><button className="ix" id="colAll" onClick={() => O.setAll(tree, false)}>Collapse all</button></div>
+        <button className="btn primary sm ix" id="addFor" onClick={() => setPicker(true)}>＋ Add task for…</button>
+      </span>
+    </div>
+    {ui.more && <div className="pfilters morefilters">
+      <select className="fsel" id="pf-person" aria-label="Person" value={f.person} onChange={(e) => setF({ person: e.target.value })}><option value="">All people</option>{peopleOpts.map((p) => <option key={p.id} value={p.id}>{p.name}{p.active ? '' : ' (inactive)'}</option>)}</select>
+      <select className="fsel" id="pf-proj" aria-label="Project" value={f.project} onChange={(e) => setF({ project: e.target.value })}><option value="">All projects</option>{M.sortBy(db.rt_projects).map((p) => <option key={p.id} value={p.id}>{p.name}{p.active ? '' : ' (archived)'}</option>)}</select>
+      <select className="fsel" id="pf-phase" aria-label="Phase" value={f.phase} onChange={(e) => setF({ phase: e.target.value })}><option value="">All phases</option><option value="-">Not assigned</option>{PM_PHASES.map((p) => <option key={p.key} value={p.key}>{p.no} {p.label}</option>)}</select>
+      <select className="fsel" id="pf-status" aria-label="Status" value={f.status} onChange={(e) => setF({ status: e.target.value })}><option value="">All statuses</option>{M.STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}<option value="-">Not set</option></select>
+      <select className="fsel" id="pf-prio" aria-label="Priority" value={f.priority} onChange={(e) => setF({ priority: e.target.value })}><option value="">All priorities</option>{['Critical', 'High', 'Medium', 'Low'].map((s) => <option key={s} value={s}>{s}</option>)}<option value="-">Not set</option></select>
+    </div>}
+    <div className="twrap"><table className="ptable" ref={tableRef} style={{ minWidth: leftW + tlW }} onPointerDown={onPointerDown} aria-label="Resource planner">
+      <colgroup>{cols.map(([k, , w]) => <col key={k} style={{ width: w }} />)}<col /></colgroup>
+      <thead><tr>{cols.map(([k, l]) => <th key={k} className={`c-${k}`}>{l || <span className="sr">Actions</span>}</th>)}<th className="c-tl"><div className="tlh" style={{ '--w': W }}>{g.weeks.map((wk) => <span key={wk} className={wk === M.weekStart(today) ? 'now' : ''}>{M.wkLabel(wk)}<small>{M.fmtD(wk)}</small></span>)}</div></th></tr></thead>
+      <tbody>
+        {!tree.length && <tr><td colSpan={NC + 1} className="muted empty-cell">{filtering ? 'Nothing matches these filters.' : 'No disciplines yet. Add them in Settings → People.'}</td></tr>}
+        {tree.map(({ d, people }) => {
+          const dOpen = O.isOpen(d.id); const dts = people.flatMap((x) => x.tasks); const dOp = dts.filter(M.isActive);
+          const bl = dOp.filter(M.isBlocked).length; const ov = dOp.filter((t) => M.isOverdue(t, today)).length;
+          return <React.Fragment key={d.id}>
+            <tr className={`drow ${d.kind === 'management' ? 'mgmt' : ''}`} data-name={d.name}><td colSpan={NC}><button className="dtoggle ix" data-disc={d.name} aria-expanded={dOpen} onClick={() => O.toggle(d.id)}><span className="chev" aria-hidden="true">{dOpen ? '▾' : '▸'}</span><b>{d.name}</b><span className="muted">{dOp.length}</span>{bl > 0 && <span className="flag bad">{bl} blocked</span>}{ov > 0 && <span className="flag od">{ov} overdue</span>}</button></td>
+              <td className="c-tl"><div className="tl tl-sum" style={{ '--w': W }}><NowLayer g={g} today={today} /><SumMarks tasks={dts} g={g} today={today} I={I} /></div></td></tr>
+            {dOpen && !people.length && <tr className="prow"><td colSpan={NC + 1} className="muted empty-cell">No people yet</td></tr>}
+            {dOpen && people.map(({ p, tasks }) => {
+              const pOpen = O.isOpen(p.id); const pOp = tasks.filter(M.isActive);
+              const pbl = pOp.filter(M.isBlocked).length; const pod = pOp.filter((t) => M.isOverdue(t, today)).length;
+              const mine = drafts[p.id] || []; const pinned = new Set(mine.filter((r) => r.id).map((r) => r.id));
+              const lines = [...tasks.filter((t) => !pinned.has(t.id)).map((t) => ({ key: t.id, t })),
+                ...mine.map((r) => (r.id ? (I.task[r.id] ? { key: r.key, t: I.task[r.id], r } : null) : { key: r.key, t: r.init, r })).filter(Boolean)];
+              return <React.Fragment key={p.id}>
+                <tr className={`prow ${pOpen ? 'open' : ''} ${p.active ? '' : 'inactive'}`} data-name={p.name}><td colSpan={NC}><button type="button" className="pline ptoggle ix" data-pers={p.name} aria-expanded={pOpen} onClick={() => O.toggle(p.id)} title={`${pOpen ? 'Hide' : 'Show'} ${p.name}’s tasks`}>
+                  <span className="chev" aria-hidden="true">{pOpen ? '▾' : '▸'}</span><span className="avatar">{initials(p.name)}</span><b>{p.name}</b>{!p.active && <span className="muted">(inactive)</span>}<span className="pcount">{pOp.length} {pOp.length === 1 ? 'task' : 'tasks'}</span>{pbl > 0 && <span className="flag bad">{pbl} blocked</span>}{pod > 0 && <span className="flag od">{pod} overdue</span>}</button></td>
+                  <td className="c-tl"><div className="tl tl-sum" style={{ '--w': W }}><NowLayer g={g} today={today} /><SumMarks tasks={tasks} g={g} today={today} I={I} /></div></td></tr>
+                {pOpen && lines.map(({ key, t, r }) => <TaskRow key={key} ctx={ctx} t={t} personId={p.id} autoFocus={!!r && !r.id} onCreated={(id) => onCreated(p.id, key, id)} onCancel={() => onCancel(p.id, key)} />)}
+                {pOpen && <tr className="addrow-t"><td colSpan={NC}>{p.active ? <button className="addtask ix" data-addfor={p.name} onClick={() => addDraft(p)}>＋ Add task</button> : <span className="addtask muted">Inactive — no new assignments</span>}</td>
+                  <td className="c-tl">{p.active ? <div className="tl tl-add" data-tladd={p.id} style={{ '--w': W }}><NowLayer g={g} today={today} /><span className="tl-hint">＋ drag to add</span></div> : <div className="tl" style={{ '--w': W }} />}</td></tr>}
+              </React.Fragment>;
+            })}
+          </React.Fragment>;
+        })}
+      </tbody></table></div>
+    <div className="glegend" aria-label="Timeline legend"><span><i className="lb seg-doing" />In progress</span><span><i className="lb seg-waiting" />Waiting</span><span><i className="lb seg-stuck" />Blocked</span><span><i className="lb seg-not" />Not started</span><span><i className="lb seg-none" />No status</span><span><i className="lb seg-done" />Done</span><span><i className="lov" />Overdue (Due → today)</span><span><i className="ld" />Due date only</span><span><i className="lt" />Today</span><span><i className="ln" />This week</span></div>
+    <p className="hint muted">Edit any cell: lists and dates save when chosen; text saves on Enter or when you leave the cell. Drag a bar to move it, drag its ends to change Start or Due, or drag across an empty timeline to set dates.</p>
+    <div ref={dragTip} className="tip" hidden />
+    {picker && <Modal close={() => setPicker(false)} label="Add a task for…" wide><h3>Add a task for…</h3><p className="muted small">Pick a person. Their row opens with a new task ready to fill in. Numbers show open tasks.</p>
+      <div className="whogrid">{discs.map((d) => ({ d, ps: M.peopleOf(db, d.id) })).filter((x) => x.ps.length).map(({ d, ps }) => <div key={d.id} className="whogroup"><span className="label">{d.name}</span><div className="names">{ps.map((p) => <button key={p.id} className="opt ix" data-addto={p.name} onClick={() => { setPicker(false); addDraft(p); }}><span className="avatar">{initials(p.name)}</span>{p.name}<span className="muted cnt">{db.rt_tasks.filter((t) => t.person_id === p.id && t.active !== false && M.isActive(t)).length}</span></button>)}</div></div>)}</div></Modal>}
+  </div>;
+}
+
+// One editable task row: table cells + its Gantt marks. Remote changes update every field this
+// row hasn't changed locally; a field being edited keeps the user's text until it is saved.
+function TaskRow({ ctx, t, personId, autoFocus, onCreated, onCancel }) {
+  const { store, db, today, say, setConfirm, setPanel, cols, g, attnMode, I } = ctx;
   const isNew = !t.id;
   const [f, setF] = useState(() => fromT(t));
-  const [err, setErr] = useState(null);
-  const [saved, setSaved] = useState(0);
-  const [menu, setMenu] = useState(false);
-  const ref = useRef(null); const skip = useRef(false);
-  // Remote / stored changes: take the new value for every field this row hasn't changed locally;
-  // a field being edited keeps the user's text (it is saved when they leave it).
-  const base = useRef(fromT(t));
+  const [err, setErr] = useState(null); const [saved, setSaved] = useState(0); const [menu, setMenu] = useState(false);
+  const ref = useRef(null); const skip = useRef(false); const base = useRef(fromT(t));
   useEffect(() => {
     const prev = base.current; const next = fromT(t); base.current = next;
     setF((cur) => Object.fromEntries(Object.keys(next).map((k) => [k, cur[k] === prev[k] ? next[k] : cur[k]])));
@@ -471,12 +622,10 @@ function TaskLine({ ctx, t, personId, cols, tpl, g, tipFor, why, om, autoFocus, 
   const commit = (nf = f, explicit = false) => {
     if (isNew) {
       if (!nf.project_id || !nf.title.trim()) { if (explicit) setErr('Choose a project and enter a task name.'); return false; }
-      const r = store.saveTask({ ...nf, person_id: personId });
+      const r = store.saveTask({ ...valOf(nf), person_id: personId });
       if (!r.ok) { setErr(r.error); say(r); return false; }
       setErr(null); setSaved(Date.now()); onCreated(r.row.id); return true;
     }
-    if (JSON.stringify(nf) === JSON.stringify(fromT(t))) { setErr(null); return true; }
-    // Only send the fields changed here, on top of the latest stored row (keeps others' edits).
     const changed = Object.fromEntries(Object.keys(nf).filter((k) => nf[k] !== base.current[k]).map((k) => [k, nf[k]]));
     if (!Object.keys(changed).length) { setErr(null); return true; }
     const r = store.saveTask({ ...t, ...fromT(t), ...changed, id: t.id });
@@ -486,326 +635,157 @@ function TaskLine({ ctx, t, personId, cols, tpl, g, tipFor, why, om, autoFocus, 
   const blank = !f.project_id && !f.title && !f.start_date && !f.due_date && !f.hours_per_week && !f.notes;
   const upd = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const pick = (k) => (e) => { const nf = { ...f, [k]: e.target.value }; setF(nf); commit(nf); };
-  const pickDate = (k) => (v) => { const nf = { ...f, [k]: v || '' }; setF(nf); if (!commit(nf) && isNew) { /* kept as draft until project + task are set */ } };
+  const pickDate = (k) => (v) => { const nf = { ...f, [k]: v || '' }; setF(nf); commit(nf); };
   const keys = (k) => (e) => {
     if (e.key === 'Enter') { e.preventDefault(); commit(f, true); }
     else if (e.key === 'Escape') { e.preventDefault(); skip.current = true; if (isNew && blank) { onCancel(); return; } setF({ ...f, [k]: fromT(t)[k] }); setErr(null); e.target.blur(); }
   };
   const leave = () => { if (skip.current) { skip.current = false; return; } commit(); };
-  const dt = { ...t, ...valOf(f), active: t.active ?? true };
-  const od = M.overdueDays(dt, g.today); const bl = dt.status === 'Blocked';
+  const dt = { ...t, ...valOf(f), person_id: personId, active: t.active ?? true };
+  const od = M.overdueDays(dt, today); const bl = M.isBlocked(dt);
   const projects = M.activeProjects(db); const curProj = t.project_id && db.rt_projects.find((p) => p.id === t.project_id && !p.active);
-  const reasons = why ? [...M.attentionReasons(dt, g.today).filter((r) => !/^Overdue|^Blocked/.test(r)), ...(H.heavyOverlap(dt, om) ? [`Overlaps ${om[dt.id].length} tasks`] : [])] : [];
+  const reasons = attnMode && M.isActive(dt) ? V.attention(dt, today) : [];
+  const tip = `${dt.title || 'New task'} · ${I.project[dt.project_id]?.name || 'No project'} · ${dt.start_date ? V.fmtDay(dt.start_date) : 'Start not defined'} → ${dt.due_date ? V.fmtDay(dt.due_date) : 'Due not defined'} · ${stLabel(dt.status)}`;
   const cells = {
-    project: <select className={`rt-in ${f.project_id ? '' : 'empty'}`} aria-label="Project" autoFocus={autoFocus} value={f.project_id} onChange={pick('project_id')} onKeyDown={keys('project_id')}>
+    project: <select className={`cell ${f.project_id ? '' : 'empty'}`} aria-label="Project" autoFocus={autoFocus} value={f.project_id} onChange={pick('project_id')} onKeyDown={keys('project_id')}>
       <option value="">Choose project…</option>{projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}{curProj && <option value={curProj.id}>{curProj.name} (archived)</option>}</select>,
-    title: <input className="rt-in rt-title" aria-label="Task" value={f.title} placeholder={isNew ? 'Task description…' : ''} title={reasons.length ? `Needs attention: ${reasons.join(' · ')}` : f.title} onChange={upd('title')} onBlur={leave} onKeyDown={keys('title')} />,
-    phase: <select className={`rt-in rt-phsel ${f.phase_key ? '' : 'empty'}`} aria-label="Phase" value={f.phase_key} title={phaseLabel(f.phase_key)} onChange={pick('phase_key')} onKeyDown={keys('phase_key')}>
-      <option value="">Not assigned</option>{PM_PHASES.map((p) => <option key={p.key} value={p.key}>{p.no} {p.label}</option>)}</select>,
-    start: <DatePick label="Start" value={f.start_date} onPick={pickDate('start_date')} className={f.start_date ? '' : 'empty'}>{f.start_date ? M.fmtD(f.start_date) : '—'}</DatePick>,
-    due: <DatePick label="Due" value={f.due_date} onPick={pickDate('due_date')} className={`${f.due_date ? '' : 'empty'} ${od ? 'od' : ''}`}>
-      {f.due_date ? <>{M.fmtD(f.due_date)}{od > 0 && <span className="rt-odtag">Overdue · {od}d</span>}</> : '—'}</DatePick>,
-    hrs: <input className={`rt-in rt-hrsin ${f.hours_per_week === '' ? 'empty' : ''}`} aria-label="Hrs per week" inputMode="decimal" placeholder="Unest." title={f.hours_per_week === '' ? 'Unestimated' : `${f.hours_per_week} h per week`} value={f.hours_per_week} onChange={upd('hours_per_week')} onBlur={leave} onKeyDown={keys('hours_per_week')} />,
-    status: <select className={`rt-in rt-stsel st-${stKey(f.status)}`} aria-label="Status" value={f.status} onChange={pick('status')} onKeyDown={keys('status')}><option value="">— status —</option>{M.STATUSES.map((s) => <option key={s} value={s}>{s === 'Blocked' ? '⚠ Blocked' : s}</option>)}</select>,
-    priority: <select className={`rt-in rt-prsel pr-${(f.priority || 'none').toLowerCase()}`} aria-label="Priority" value={f.priority} onChange={pick('priority')} onKeyDown={keys('priority')}><option value="">—</option>{['Critical', 'High', 'Medium', 'Low'].map((s) => <option key={s}>{s}</option>)}</select>,
-    notes: <input className={`rt-in rt-notes ${bl && f.notes ? 'bl' : ''}`} aria-label="Notes" value={f.notes} placeholder={bl ? 'Blocker reason…' : ''} title={f.notes} onChange={upd('notes')} onBlur={leave} onKeyDown={keys('notes')} />,
-    menu: isNew ? <span className="rt-dacts2"><button className="rt-ok" aria-label="Save task" title="Save (Enter)" onMouseDown={(e) => e.preventDefault()} onClick={() => commit(f, true)}>✓</button><button className="rt-x" aria-label="Cancel new task" title="Cancel (Esc)" onMouseDown={(e) => e.preventDefault()} onClick={onCancel}>×</button></span>
-      : <span className="rt-dacts2">{err ? <span className="rt-errdot" title={err}>!</span> : saved ? <span className="rt-saved" title="Saved">✓</span> : null}
-        <button className="rt-more" aria-label="More actions" aria-expanded={menu} onClick={() => setMenu(!menu)}>⋯</button>
-        {menu && <div className="rt-menu" role="menu"><button role="menuitem" onClick={() => { setMenu(false); setPanel({ kind: 'task', row: t }); }}>More details</button>
+    title: <><input className="cell ttl" type="text" aria-label="Task" value={f.title} placeholder={isNew ? 'Task name…' : ''} onChange={upd('title')} onBlur={leave} onKeyDown={keys('title')} />
+      {(reasons.length > 0 || err) && <span className="flags">{err ? <span className="flag bad" role="alert">{err}</span> : reasons.map(([c, l]) => <span key={l} className={`flag ${c}`}>{l}</span>)}</span>}</>,
+    phase: <select className={`cell ${f.phase_key ? '' : 'muted'}`} aria-label="Phase" value={f.phase_key} title={phaseLabel(f.phase_key)} onChange={pick('phase_key')} onKeyDown={keys('phase_key')}><option value="">Not assigned</option>{PM_PHASES.map((p) => <option key={p.key} value={p.key}>{p.no} {p.label}</option>)}</select>,
+    start: <DatePick label="Start" value={f.start_date} onPick={pickDate('start_date')} className={`cell dcell ${f.start_date ? '' : 'miss'}`}>{f.start_date ? M.fmtD(f.start_date) : 'Not set'}</DatePick>,
+    due: <DatePick label="Due" value={f.due_date} onPick={pickDate('due_date')} className={`cell dcell ${f.due_date ? (od ? 'late' : '') : 'miss'}`}>{f.due_date ? <>{M.fmtD(f.due_date)}{od > 0 && <small className="odtag"> · {od}d late</small>}</> : 'Not set'}</DatePick>,
+    status: <select className={`cell st st-${V.stKey(f.status)} ${f.status ? '' : 'empty'}`} aria-label="Status" value={f.status} onChange={pick('status')} onKeyDown={keys('status')}><option value="">— status —</option>{M.STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}</select>,
+    priority: <select className={`cell pr pr-${(f.priority || 'none').toLowerCase()}`} aria-label="Priority" value={f.priority} onChange={pick('priority')} onKeyDown={keys('priority')}><option value="">—</option>{['Critical', 'High', 'Medium', 'Low'].map((s) => <option key={s} value={s}>{s}</option>)}</select>,
+    notes: <input className={`cell ${bl && f.notes ? 'blnote' : ''}`} type="text" aria-label="Notes" value={f.notes} placeholder={bl ? 'Blocker reason…' : 'Notes'} title={f.notes} onChange={upd('notes')} onBlur={leave} onKeyDown={keys('notes')} />,
+    menu: isNew ? <span className="rowacts"><button className="xbtn ok ix" aria-label="Save task" title="Save (Enter)" onMouseDown={(e) => e.preventDefault()} onClick={() => commit(f, true)}>✓</button><button className="xbtn ix" aria-label="Cancel new task" title="Cancel (Esc)" onMouseDown={(e) => e.preventDefault()} onClick={onCancel}>×</button></span>
+      : <span className="rowacts">{saved ? <span className="savedmark" title="Saved">✓</span> : null}<button className="xbtn ix" aria-label="More actions" aria-expanded={menu} onClick={() => setMenu(!menu)}>⋯</button>
+        {menu && <div className="rt-menu" role="menu"><button role="menuitem" onClick={() => { setMenu(false); setPanel({ kind: 'task', row: t }); }}>More details…</button>
           <button role="menuitem" className="danger" onClick={() => { setMenu(false); setConfirm({ title: 'Delete this task?', text: `"${t.title}" will be removed from the Resource Tracker for everyone. This cannot be undone.`, action: () => say(store.deleteTask(t.id), 'Task deleted') }); }}>Delete task</button></div>}</span>,
   };
-  return (
-    <div ref={ref} className={`rt-row rt-trow rt-erow ${isNew ? 'draft' : ''} ${bl ? 'is-bl' : ''} ${od ? 'is-od' : ''} ${dt.status === 'Done' ? 'is-done' : ''} ${err ? 'has-err' : ''} ${menu ? 'menu-open' : ''}`} style={{ width: g.L + g.W }} data-title={t.title || ''} role="row">
-      <div className="rt-l rt-cells" style={{ gridTemplateColumns: tpl, columnGap: GAP, paddingLeft: INDENT }}>{cols.map(([k]) => <div key={k} className={`rt-c c-${k}`}>{cells[k]}</div>)}
-        {err && <div className="rt-rowerr" role="alert">{err}</div>}
-        {!err && reasons.length > 0 && <div className="rt-why2">Needs attention: {reasons.join(' · ')}</div>}</div>
-      <div className="rt-r rt-track rg-track" style={{ width: g.W }} onClick={() => ref.current?.querySelector('.c-title input')?.focus()} {...(dt.title ? tipFor(dt) : {})}>
-        <GBg g={g} />{isNew && blank ? <span className="rg-nodate">New task — choose a project, describe it, set dates</span> : ganttMarks(dt, g, true)}</div>
-    </div>
-  );
+  const undated = !isNew && !t.start_date && !t.due_date;
+  return <tr ref={ref} className={`trow ${isNew ? 'draft' : ''} ${dt.status === 'Done' ? 'is-done' : ''} ${bl ? 'is-stuck' : ''} ${od ? 'is-late' : ''} ${err ? 'has-err' : ''} ${menu ? 'menu-open' : ''}`} data-row={t.id || ''} data-title={t.title || ''}>
+    {cols.map(([k]) => <td key={k} className={`c-${k}`}>{cells[k]}</td>)}
+    <td className="c-tl"><div className="tl" data-tlset={undated ? t.id : undefined} style={{ '--w': g.weeks.length }}><NowLayer g={g} today={today} />
+      {isNew && blank ? <span className="tl-none">New task — choose a project and name it</span> : <TaskMarks t={dt} g={g} today={today} tip={tip} />}</div></td>
+  </tr>;
 }
 
-// ── Timeline: large Gantt for resource analysis (read-only rows) ────────────
-function ResourceTimeline({ db, setPanel, vs, setVs, setF }) {
-  const today = todayISO();
-  const [focus, setFocus] = useState(null); // person id in Focus mode
-  const [tip, setTip, tipFor] = useTip();
-  const filt = { ...vs.f, mode: vs.mode };
-  const filtering = H.taskFiltering(filt);
-  const tree = H.buildTree(db, today, filt);
-  const O = useOpen(filtering, JSON.stringify(filt), 'timeline');
-  const I = M.index(db);
-  const [gridRef, gw] = useWidth();
-  const L = gw && gw < 900 ? 250 : 340;
-  const g = { ...geometry(vs, gw ? gw - L - 2 : 0, vs.range === 4 ? 140 : vs.range === 8 ? 76 : 56), L };
-  const open = (t) => { setTip(null); setPanel({ kind: 'task', row: t }); };
-  const row = (cls, left, right, extra = {}) => <div className={`rt-row ${cls}`} style={{ width: L + g.W }} {...extra}>{left}<div className="rt-r rg-track" style={{ width: g.W }}><GBg g={g} />{right}</div></div>;
-  const fp = focus && I.person[focus];
-  if (fp) return <PersonFocus db={db} p={fp} vs={vs} setVs={setVs} setPanel={setPanel} back={() => { O.setOne(fp.discipline_id, true); O.setOne(fp.id, true); setFocus(null); }} />;
-  return (
-    <div className="rt-timeline2">
-      <KpiStrip db={db} vs={vs} setF={setF} />
-      <div className="rt-toolbar">
-        <RangeBar vs={vs} setVs={setVs} g={g} />
-        <span className="grow" />
-        <button className="btn sm" onClick={() => O.setAll(tree, true)}>Expand All</button>
-        <button className="btn sm" onClick={() => O.setAll(tree, false)}>Collapse All</button>
-      </div>
-      <FilterBar db={db} vs={vs} setF={setF} setVs={setVs} />
-      <div className="rt-grid rg rg-big" ref={gridRef} role="treegrid" aria-label="Resource timeline" style={{ '--l': `${L}px` }}>
-        <div className="rt-row rt-hdr rg-hdr" style={{ width: L + g.W }}>
-          <div className="rt-l rg-hl">Discipline / person / task</div>
-          <div className="rt-r rg-hr" style={{ width: g.W }}><GHeader g={g} /></div>
-        </div>
-        {!tree.length && row('', <div className="rt-l muted small">Nothing matches these filters.</div>)}
-        {tree.map(({ d, stats, people: ppl }) => {
-          const dOpen = O.isOpen(d.id);
-          return (
-            <div key={d.id} className={`rt-disc ${d.kind === 'management' ? 'mgmt' : ''} ${dOpen ? 'open' : ''}`} data-name={d.name}>
-              {row('rt-drow tl2-d', <div className="rt-l"><button className="rt-dhead" aria-expanded={dOpen} aria-label={`${dOpen ? 'Collapse' : 'Expand'} ${d.name}`} onClick={() => O.toggle(d.id)}><Chev open={dOpen} />
-                <span className="rt-dtext"><span className="rt-dname">{d.name}</span><DiscRollup s={stats} /></span></button>
-                {ppl.length > 0 && <button className="rt-only" title={`Expand only ${d.name}`} aria-label={`Expand only ${d.name}`} onClick={() => O.only(tree, d.id)}>Only</button>}</div>,
-                <Coverage tasks={ppl.flatMap((x) => x.tasks)} g={g} cls="d" />)}
-              {dOpen && !ppl.length && row('rt-empty', <div className="rt-l">No people yet</div>)}
-              {dOpen && ppl.map(({ p, stats: ps, tasks }) => {
-                const pOpen = O.isOpen(p.id); const note = H.overlapNote(ps);
-                return (
-                  <div key={p.id} className={`rt-person ${p.active ? '' : 'inactive'}`} data-name={p.name}>
-                    {row('rt-prow tl2-p', <div className="rt-l"><button className="rt-phead" aria-expanded={pOpen} aria-label={`${pOpen ? 'Collapse' : 'Expand'} ${p.name}`} onClick={() => O.toggle(p.id)}><Chev open={pOpen} />
-                      <span className="rt-dtext"><span className="rt-pname">{p.name}{!p.active && <span className="muted"> (inactive)</span>}</span>
-                        <span className="rt-proll">{H.plural(ps.active, 'task')}{(ps.blocked || ps.overdue) ? <span className="rt-pbad"> · ⚠︎ {[ps.blocked && `${ps.blocked} blocked`, ps.overdue && `${ps.overdue} overdue`].filter(Boolean).join(' · ')}</span> : null}</span>
-                        {note && <span className={`rt-ovn ${note.key}`}>{note.text}</span>}</span></button>
-                      <button className="rt-focus" aria-label={`Focus ${p.name}`} title={`Focus on ${p.name}'s schedule`} onClick={() => { setTip(null); setFocus(p.id); }}>⤢ Focus</button></div>,
-                      <><Coverage tasks={tasks} g={g} cls="p" /><LoadMarks db={db} pid={p.id} g={g} /></>)}
-                    {pOpen && tasks.map((t) => {
-                      const od = M.overdueDays(t, today); const bl = M.isBlocked(t); const pr = I.project[t.project_id];
-                      return row(`rt-trow tl2-t ${bl ? 'is-bl' : ''} ${od ? 'is-od' : ''} ${t.status === 'Done' ? 'is-done' : ''}`,
-                        <div className="rt-l"><button className="tl2-name" onClick={() => open(t)} {...tipFor(t)}><span className="tl2-proj">{pr?.name || '—'}</span><span className="tl2-sep"> — </span><span className="tl2-title">{t.title}</span></button>
-                          <span className="tl2-flags">{od > 0 && <span className="rt-flag od sm">{od}d</span>}{bl && <span className="rt-flag bl sm">⚠︎</span>}{t.phase_key && <span className="tl2-ph" title={phaseLabel(t.phase_key)}>{PM_PHASES.find((x) => x.key === t.phase_key)?.no}</span>}</span></div>,
-                        ganttMarks(t, g), { key: t.id, 'data-title': t.title, onClick: (e) => { if (e.target.closest('.rg-track')) open(t); }, ...tipForTrack(tipFor, t) });
-                    })}
-                    {pOpen && !tasks.length && row('rt-trow tl2-t none', <div className="rt-l muted small">{filtering ? 'No matching tasks' : 'No tasks'}</div>)}
-                  </div>);
-              })}
-            </div>);
-        })}
-      </div>
-      <Legend extra="Hover a bar for details · click to open it · ⤢ Focus shows one person across all projects." />
-      {tip && <TaskTip db={db} t={tip.t} today={today} pos={tip} />}
-    </div>
-  );
-}
-const tipForTrack = (tipFor, t) => { const h = tipFor(t); return { onMouseMove: (e) => (e.target.closest('.rg-track') ? h.onMouseMove(e) : h.onMouseLeave()), onMouseLeave: h.onMouseLeave }; };
-
-// Person Focus: one person, all projects, concurrency + weekly load across the range.
-function PersonFocus({ db, p, vs, setVs, setPanel, back }) {
-  const today = todayISO();
-  const [tip, setTip, tipFor] = useTip();
-  const I = M.index(db);
-  const [gridRef, gw] = useWidth();
-  const L = gw && gw < 900 ? 230 : 300;
-  const g = { ...geometry(vs, gw ? gw - L - 2 : 0, vs.range === 4 ? 150 : vs.range === 8 ? 80 : 60), L };
-  const disc = I.disc[p.discipline_id];
-  const ps = M.personStats(db, p.id, today);
-  const all = db.rt_tasks.filter((t) => t.person_id === p.id && t.active !== false);
-  const act = all.filter(M.isActive);
-  const order = (t) => (t.start_date || t.due_date || '9999');
-  const dated = act.filter((t) => t.start_date && t.due_date).sort((a, b) => a.start_date.localeCompare(b.start_date) || a.due_date.localeCompare(b.due_date));
-  const partial = act.filter((t) => !(t.start_date && t.due_date) && (t.start_date || t.due_date)).sort((a, b) => order(a).localeCompare(order(b)));
-  const none = act.filter((t) => !t.start_date && !t.due_date);
-  const done = all.filter((t) => t.status === 'Done');
-  const om = M.overlapMap(act);
-  // Weekly summary from dated tasks only (undated work is listed, not placed on the calendar).
-  const weekly = g.weeks.map((wk) => {
-    const ts = dated.filter((t) => t.start_date <= M.addDays(wk, 6) && t.due_date >= wk);
-    const known = ts.filter((t) => t.hours_per_week != null); const h = known.reduce((s, t) => s + t.hours_per_week, 0);
-    const unest = ts.length - known.length; const cap = p.weekly_capacity_hours;
-    return { wk, n: ts.length, h, kn: known.length, unest, cap, over: !!cap && h > cap, pct: cap ? Math.round((h / cap) * 100) : null };
-  });
-  // Concurrency bands (days with 2+ dated tasks running).
-  const conc = M.concurrency(dated, g.start, g.end).days; const bands = [];
-  conc.forEach(([d, n]) => { const last = bands[bands.length - 1]; if (n >= 2 && last && last.n === n && M.addDays(last.to, 1) === d) last.to = d; else if (n >= 2) bands.push({ from: d, to: d, n }); });
-  const note = H.overlapNote(ps);
-  const open = (t) => { setTip(null); setPanel({ kind: 'task', row: t }); };
-  const lane = (t) => {
-    const pr = I.project[t.project_id]; const od = M.overdueDays(t, today); const bl = M.isBlocked(t); const ov = om[t.id]?.length || 0;
-    return <div key={t.id} className={`rt-row rt-trow pf-t ${bl ? 'is-bl' : ''} ${od ? 'is-od' : ''} ${ov ? 'has-ov' : ''}`} style={{ width: L + g.W }} data-title={t.title}>
-      <div className="rt-l"><button className="pf-name" onClick={() => open(t)} {...tipFor(t)}><span className="tl2-proj">{pr?.name || '—'}</span><span className="pf-title">{t.title}</span></button>
-        <span className="tl2-flags">{ov > 0 && <span className="rt-flag ov sm" title={`Runs alongside ${ov} other task(s)`}>∥ {ov}</span>}{od > 0 && <span className="rt-flag od sm">{od}d</span>}{bl && <span className="rt-flag bl sm">⚠︎ BLOCKED</span>}</span></div>
-      <div className="rt-r rg-track" style={{ width: g.W }} onClick={() => open(t)} {...tipFor(t)}><GBg g={g} />{ganttMarks(t, g)}</div>
-    </div>;
-  };
-  const group = (title, list) => (list.length ? <><div className="rt-row pf-grp" style={{ width: L + g.W }}><div className="rt-l">{title} <span className="muted">· {list.length}</span></div><div className="rt-r rg-track" style={{ width: g.W }}><GBg g={g} /></div></div>{list.map(lane)}</> : null);
-  return (
-    <div className="rt-focus-v">
-      <div className="pf-head">
-        <button className="btn sm" onClick={back}>← Back to {disc?.name || 'Discipline'}</button>
-        <div className="pf-id"><div className="rt-kicker">{disc?.name} · Resource Timeline</div><h2>{p.name.toUpperCase()} — RESOURCE TIMELINE</h2>
-          <div className="pf-meta"><span>Capacity: <b>{p.weekly_capacity_hours == null ? 'not set' : `${fmtH(p.weekly_capacity_hours)} h/week`}</b></span><span>{H.plural(ps.active, 'active task')}</span>
-            {ps.blocked > 0 && <span className="tbad">⚠︎ {ps.blocked} blocked</span>}{ps.overdue > 0 && <span className="tbad">⚠︎ {ps.overdue} overdue</span>}
-            {ps.unest > 0 && <span className="twarn">{ps.unest} unestimated</span>}<span>Peak {ps.peak} concurrent</span></div>
-          {note && <div className={`rt-ovn big ${note.key}`}>{note.text}</div>}</div>
-      </div>
-      <div className="rt-toolbar"><RangeBar vs={vs} setVs={setVs} g={g} /></div>
-      <div className="rt-grid rg rg-big pf-grid" ref={gridRef} role="grid" aria-label={`${p.name} resource timeline`} style={{ '--l': `${L}px` }}>
-        <div className="rt-row rt-hdr rg-hdr" style={{ width: L + g.W }}><div className="rt-l rg-hl">Project / task</div><div className="rt-r rg-hr" style={{ width: g.W }}><GHeader g={g} /></div></div>
-        <div className="rt-row pf-week" style={{ width: L + g.W }}>
-          <div className="rt-l"><b>Weekly load</b><span className="muted small">dated tasks · known hours / capacity</span></div>
-          <div className="rt-r rg-track" style={{ width: g.W }}><GBg g={g} />{weekly.map((w) => <span key={w.wk} className={`pf-wk ${w.over ? 'over' : ''} ${w.unest ? 'unest' : ''}`} style={{ left: g.x(w.wk), width: g.colW }}>
-            {w.n ? <><b>{H.plural(w.n, 'task')}</b>{w.kn ? <span>{fmtH(w.h)}{w.cap ? ` / ${fmtH(w.cap)}` : ''} h</span> : null}{w.over ? <em className="o">OVER CAPACITY</em> : w.unest ? <em>+{w.unest} unest.</em> : null}</> : <span className="muted">—</span>}</span>)}</div>
-        </div>
-        <div className="rt-row pf-conc" style={{ width: L + g.W }}>
-          <div className="rt-l"><b>Concurrent tasks</b><span className="muted small">days with 2+ tasks running</span></div>
-          <div className="rt-r rg-track" style={{ width: g.W }}><GBg g={g} />{bands.map((b) => { const a = g.x(b.from); const w = g.x(M.addDays(b.to, 1)) - a; return <span key={b.from} className={`pf-band n${Math.min(b.n, 3)}`} style={{ left: a, width: w }} title={`${b.n} tasks at once · ${M.fmtD(b.from)}–${M.fmtD(b.to)}`}>{w > 18 ? b.n : ''}</span>; })}
-            {!bands.length && <span className="rg-nodate">No overlapping dated tasks in this period</span>}</div>
-        </div>
-        {group('Scheduled (Start → Due)', dated)}
-        {group('Only one date set', partial)}
-        {group('Dates not defined', none)}
-        {group('Done', done)}
-      </div>
-      <Legend extra="∥ n = runs alongside n other tasks. Overlap is not an error by itself; over capacity is when known hours exceed capacity." />
-      {tip && <TaskTip db={db} t={tip.t} today={today} pos={tip} />}
-    </div>
-  );
-}
-
-// ── Task panel (add / edit) ─────────────────────────────────────────────────
+// ── Task drawer ("More details…": reassign person, every field) ─────────────
 function TaskPanel({ store, db, row, close, say, setConfirm }) {
-  const isNew = !row.id; const today = todayISO();
   const [f, setF] = useState(() => ({ person_id: '', project_id: '', title: '', phase_key: '', start_date: '', due_date: '', hours_per_week: '', status: '', priority: '', notes: '', ...Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v ?? ''])) }));
   const F = (k) => (e) => setF({ ...f, [k]: e.target.value });
-  const person = db.rt_people.find((p) => p.id === f.person_id);
-  const disc = person && db.rt_disciplines.find((d) => d.id === person.discipline_id);
-  const groups = M.disciplinesOf(db).map((d) => ({ d, people: M.peopleOf(db, d.id) })).filter((g) => g.people.length);
+  const person = db.rt_people.find((p) => p.id === f.person_id); const disc = person && db.rt_disciplines.find((d) => d.id === person.discipline_id);
+  const groups = M.disciplinesOf(db).map((d) => ({ d, people: M.peopleOf(db, d.id) })).filter((x) => x.people.length);
   const orig = row.person_id && db.rt_people.find((p) => p.id === row.person_id);
   const projects = M.activeProjects(db); const origProj = row.project_id && db.rt_projects.find((p) => p.id === row.project_id && !p.active);
-  const save = () => { if (say(store.saveTask({ ...f, id: row.id }), isNew ? 'Task added' : 'Task saved')) close(); };
-  const live = { ...row, ...f, start_date: f.start_date || null, due_date: f.due_date || null, hours_per_week: f.hours_per_week === '' ? null : +f.hours_per_week, active: row.active ?? true };
-  const reasons = M.attentionReasons(live, today);
-  return (
-    <Drawer title={isNew ? 'Add task' : 'Edit task'} close={close} footer={<>
-      <button className="btn primary" id="rt-save" onClick={save}>Save</button><button className="btn" onClick={close}>Cancel</button><span className="grow" />
-      {!isNew && <button className="btn danger" onClick={() => setConfirm({ title: 'Delete this task?', text: `"${row.title}" will be removed from the Resource Tracker for everyone. This cannot be undone.`, action: () => { if (say(store.deleteTask(row.id), 'Task deleted')) close(); } })}>Delete</button>}</>}>
-      <div className="rt-form">
-        {!isNew && reasons.length > 0 && <div className="rt-panel-iss">{reasons.map((r) => <span key={r} className={`rt-flag ${/Overdue|Blocked/.test(r) ? (/Overdue/.test(r) ? 'od' : 'bl') : 'nt'}`}>{r === 'Blocked' ? '⚠︎ BLOCKED' : r}</span>)}</div>}
-        <label>Person<select id="rt-f-person" value={f.person_id} onChange={F('person_id')}><option value="">Choose…</option>
-          {groups.map((g) => <optgroup key={g.d.id} label={g.d.name}>{g.people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>)}
-          {orig && !orig.active && <optgroup label="Inactive"><option value={orig.id}>{orig.name} (inactive)</option></optgroup>}</select></label>
-        <div className="rt-derived">Discipline: <b>{disc ? disc.name : '—'}</b> <span className="muted">(from the person)</span></div>
-        <label>Project<select id="rt-f-project" value={f.project_id} onChange={F('project_id')}><option value="">Choose…</option>{projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          {origProj && <option value={origProj.id}>{origProj.name} (archived)</option>}</select></label>
-        <label>Task<input id="rt-f-title" value={f.title} onChange={F('title')} placeholder="What needs doing" /></label>
-        <label>Phase (future PM Workflow classification)<select id="rt-f-phase" value={f.phase_key} onChange={F('phase_key')}><option value="">Not assigned</option>{PM_PHASES.map((p) => <option key={p.key} value={p.key}>{p.no} {p.label}</option>)}</select></label>
-        <div className="rt-2"><label>Start<input type="date" id="rt-f-start" value={f.start_date} onChange={F('start_date')} /></label><label>Due<input type="date" id="rt-f-due" value={f.due_date} onChange={F('due_date')} /></label></div>
-        <label>Hrs / Week<input type="number" id="rt-f-hrs" min="0" max="80" step="0.5" value={f.hours_per_week} onChange={F('hours_per_week')} placeholder="Blank = unestimated" /></label>
-        <div className="rt-2"><label>Status<select id="rt-f-status" value={f.status} onChange={F('status')}><option value="">— not set —</option>{M.STATUSES.map((s) => <option key={s}>{s}</option>)}</select></label>
-          <label>Priority<select id="rt-f-priority" value={f.priority} onChange={F('priority')}><option value="">— not set —</option>{M.PRIORITIES.map((s) => <option key={s}>{s}</option>)}</select></label></div>
-        <label>Notes<textarea id="rt-f-notes" rows={4} value={f.notes} onChange={F('notes')} /></label>
-        <p className="small muted">Blank dates and Hrs / Week stay blank. Workload counts Hrs / Week in every week between Start and Due. Hours never change task progress.</p>
-      </div>
-    </Drawer>
-  );
+  const save = () => { if (say(store.saveTask({ ...f, id: row.id }), 'Task saved')) close(); };
+  const live = { ...row, ...valOf(f), active: row.active ?? true };
+  const miss = M.isActive(live) ? V.planningMissing(live) : [];
+  return <Drawer title="Task details" close={close} footer={<><button className="btn primary ix" id="rt-save" onClick={save}>Save</button><button className="btn ghost ix" onClick={close}>Cancel</button><span className="grow" />
+    <button className="btn danger ix" onClick={() => setConfirm({ title: 'Delete this task?', text: `"${row.title}" will be removed from the Resource Tracker for everyone. This cannot be undone.`, action: () => { if (say(store.deleteTask(row.id), 'Task deleted')) close(); } })}>Delete</button></>}>
+    <div className="rt-form">
+      {miss.length > 0 && <p className="flag warn">Missing for planning: {miss.join(', ')}</p>}
+      <label>Person<select id="rt-f-person" value={f.person_id} onChange={F('person_id')}><option value="">Choose…</option>
+        {groups.map((x) => <optgroup key={x.d.id} label={x.d.name}>{x.people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>)}
+        {orig && !orig.active && <optgroup label="Inactive"><option value={orig.id}>{orig.name} (inactive)</option></optgroup>}</select></label>
+      <div className="muted small">Discipline: <b>{disc ? disc.name : '—'}</b> (from the person)</div>
+      <label>Project<select id="rt-f-project" value={f.project_id} onChange={F('project_id')}><option value="">Choose…</option>{projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}{origProj && <option value={origProj.id}>{origProj.name} (archived)</option>}</select></label>
+      <label>Task<input type="text" id="rt-f-title" value={f.title} onChange={F('title')} /></label>
+      <label>Phase<select id="rt-f-phase" value={f.phase_key} onChange={F('phase_key')}><option value="">Not assigned</option>{PM_PHASES.map((p) => <option key={p.key} value={p.key}>{p.no} {p.label}</option>)}</select></label>
+      <div className="rt-2"><label>Start<input type="date" id="rt-f-start" value={f.start_date} onChange={F('start_date')} /></label><label>Due<input type="date" id="rt-f-due" value={f.due_date} onChange={F('due_date')} /></label></div>
+      <div className="rt-2"><label>Status<select id="rt-f-status" value={f.status} onChange={F('status')}><option value="">— not set —</option>{M.STATUSES.map((s) => <option key={s}>{s}</option>)}</select></label>
+        <label>Priority<select id="rt-f-priority" value={f.priority} onChange={F('priority')}><option value="">— not set —</option>{M.PRIORITIES.map((s) => <option key={s}>{s}</option>)}</select></label></div>
+      <label>Notes<textarea id="rt-f-notes" rows={4} value={f.notes} onChange={F('notes')} /></label>
+      <p className="small muted">Blank dates stay blank. Planning data is complete with Person, Project, Status, Start and Due.</p>
+    </div>
+  </Drawer>;
 }
 
-// ── Projects screen ─────────────────────────────────────────────────────────
-function Projects({ store, db, setPanel, say, setConfirm }) {
-  const [showArch, setShowArch] = useState(false);
+// ── Settings: Projects & phases · People ─────────────────────────
+function Settings(props) {
+  const [tab, setTab] = useState('projects');
+  return <>
+    <section className="hero" style={{ paddingBottom: 0 }}><h1>Settings</h1>
+      <div className="subtabs" role="tablist">{[['projects', 'Projects & phases'], ['people', 'People']].map(([k, l]) => <button key={k} className="ix" role="tab" data-settab={k} aria-selected={tab === k} onClick={() => setTab(k)}>{l}</button>)}</div></section>
+    <div className="setbody">{tab === 'projects' ? <ProjectsTab {...props} /> : <PeopleTab {...props} />}</div>
+  </>;
+}
+function ProjectsTab({ store, db, say, setConfirm, setPanel }) {
+  const [showArch, setShowArch] = useState(false); const [nm, setNm] = useState('');
+  const supported = store.supportsProjectPhase;
   const count = (id) => db.rt_tasks.filter((t) => t.project_id === id).length;
   const list = M.sortBy(db.rt_projects.filter((p) => showArch || p.active));
-  return (
-    <div className="rt-page">
-      <div className="rt-toolbar"><label className="check small"><input type="checkbox" checked={showArch} onChange={(e) => setShowArch(e.target.checked)} /> Show archived</label><span className="grow" />
-        <button className="btn primary sm" onClick={() => setPanel({ kind: 'project', row: {} })}>+ Add Project</button></div>
-      <div className="rt-tablewrap"><table className="rt-table">
-        <thead><tr><th>Project</th><th>Status</th><th>Project Manager</th><th>Start</th><th>Target finish</th><th>Tasks</th><th>Notes</th><th /></tr></thead>
-        <tbody>{list.map((p) => <tr key={p.id} className={p.active ? '' : 'inactive'}>
-          <td><b>{p.name}</b>{!p.active && <span className="muted"> · archived</span>}</td><td>{p.status || <span className="muted">—</span>}</td><td>{p.project_manager || <span className="muted">—</span>}</td>
-          <td>{p.start_date ? M.fmtD(p.start_date, true) : <span className="muted">—</span>}</td><td>{p.target_finish ? M.fmtD(p.target_finish, true) : <span className="muted">—</span>}</td><td>{count(p.id)}</td>
-          <td className="small">{p.notes || <span className="muted">—</span>}</td>
-          <td className="nowrap"><button className="linkish small" onClick={() => setPanel({ kind: 'project', row: p })}>Edit</button>{' · '}
-            {p.active ? <button className="linkish small" onClick={() => say(store.setProjectActive(p.id, false), `${p.name} archived`)}>Archive</button> : <button className="linkish small" onClick={() => say(store.setProjectActive(p.id, true), `${p.name} restored`)}>Restore</button>}
-            {!count(p.id) && <>{' · '}<button className="linkish small" onClick={() => setConfirm({ title: `Delete ${p.name}?`, text: 'No tasks reference this project. It will be removed permanently.', action: () => say(store.deleteProject(p.id), 'Project deleted') })}>Delete</button></>}</td></tr>)}</tbody>
-      </table></div>
-      <p className="small muted">Projects with tasks can only be archived, never deleted. Archived projects leave the Add Task list and filters but keep their tasks.</p>
-    </div>
-  );
+  const save = (p, patch, okText) => say(store.saveProject({ ...p, ...patch }), okText);
+  const add = () => { if (say(store.saveProject({ name: nm, status: 'Active' }), `Added ${nm.trim()}`)) setNm(''); };
+  return <>
+    <div className="settools"><label className="check"><input type="checkbox" id="showArch" checked={showArch} onChange={(e) => setShowArch(e.target.checked)} /> Show archived projects</label></div>
+    {!supported && <p className="note warn">Current project phase can’t be saved yet: the database needs the one-time update that adds <code>rt_projects.phase_key</code>. Everything else works.</p>}
+    <div className="setlist">{list.map((p) => {
+      const n = count(p.id); const pi = p.phase_key ? PM_PHASES.findIndex((x) => x.key === p.phase_key) : -1;
+      return <div key={p.id} className={`setrow proj ${p.active ? '' : 'off'}`} data-project={p.name}>
+        <div className="f"><label className="label" htmlFor={`pn-${p.id}`}>Project</label><InlineText id={`pn-${p.id}`} label="Project name" value={p.name} onSave={(v) => save(p, { name: v }, 'Saved')} /></div>
+        <div className="f wide"><label className="label" htmlFor={`pp-${p.id}`}>Current phase</label><select id={`pp-${p.id}`} value={p.phase_key || ''} disabled={!supported} title={supported ? '' : 'Needs the database update first'} onChange={(e) => save(p, { phase_key: e.target.value }, 'Phase saved')}><option value="">Not set</option>{PM_PHASES.map((x) => <option key={x.key} value={x.key}>{x.no} {x.label}</option>)}</select>
+          <span className="phase-steps">{PM_PHASES.map((x, j) => <i key={x.key} className={j < pi ? 'past' : j === pi ? 'cur' : ''} />)}</span></div>
+        <div className="f"><label className="label" htmlFor={`ps-${p.id}`}>Status</label><InlineText id={`ps-${p.id}`} label="Project status" list="rt-pstat" value={p.status || ''} placeholder="e.g. Active" onSave={(v) => save(p, { status: v }, 'Saved')} /></div>
+        <div className="f sw-f"><span className="label">Active</span><Switch on={p.active} label={`${p.name} active`} onChange={(v) => say(store.setProjectActive(p.id, v), v ? `${p.name} restored` : `${p.name} archived — its ${n} tasks are kept`)} /><small className="muted">{n} {n === 1 ? 'task' : 'tasks'}</small></div>
+        <div className="f acts"><button className="btn ghost sm ix" onClick={() => setPanel({ kind: 'project', row: p })}>Details</button>
+          {!n && <button className="btn ghost sm ix danger-t" onClick={() => setConfirm({ title: `Delete ${p.name}?`, text: 'No tasks reference this project. It will be removed permanently.', action: () => say(store.deleteProject(p.id), 'Project deleted') })}>Delete</button>}</div>
+      </div>;
+    })}</div>
+    <datalist id="rt-pstat"><option>Active</option><option>On Hold</option><option>Completed</option></datalist>
+    <div className="addline"><label className="label" htmlFor="newProj">New project</label><div className="addrow" style={{ margin: 0 }}><input type="text" id="newProj" placeholder="Project name" value={nm} onChange={(e) => setNm(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') add(); }} /><button className="btn primary ix" id="addProj" onClick={add}>Add project</button></div></div>
+    <p className="small muted">Projects with tasks can only be archived, never deleted. Archived projects leave the project lists for new work but keep their tasks.</p>
+    <h2 className="sub-h">Phases</h2>
+    <ol className="phaselist">{PM_PHASES.map((p) => <li key={p.key}><b>{p.label}</b> <code className="muted">{p.key}</code></li>)}</ol>
+    <p className="small muted">The six PM Workflow phases. Tasks and projects store the permanent id; the names are display only.</p>
+  </>;
 }
 function ProjectPanel({ store, row, close, say }) {
-  const isNew = !row.id;
   const [f, setF] = useState(() => ({ name: '', status: '', project_manager: '', start_date: '', target_finish: '', notes: '', ...Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v ?? ''])) }));
   const F = (k) => (e) => setF({ ...f, [k]: e.target.value });
-  const save = () => { if (say(store.saveProject({ ...f, id: row.id }), isNew ? `Project "${f.name.trim()}" added` : 'Project saved')) close(); };
-  return (
-    <Drawer title={isNew ? 'Add project' : 'Edit project'} close={close} footer={<><button className="btn primary" id="rt-p-save" onClick={save}>Save</button><button className="btn" onClick={close}>Cancel</button></>}>
-      <div className="rt-form">
-        <label>Project name<input id="rt-p-name" value={f.name} onChange={F('name')} /></label>
-        <div className="rt-2"><label>Status<input id="rt-p-status" value={f.status} onChange={F('status')} placeholder="e.g. Active" list="rt-pstat" /></label>
-          <label>Project Manager (optional)<input id="rt-p-pm" value={f.project_manager} onChange={F('project_manager')} /></label></div>
-        <datalist id="rt-pstat"><option>Active</option><option>On Hold</option><option>Completed</option></datalist>
-        <div className="rt-2"><label>Start (optional)<input type="date" id="rt-p-start" value={f.start_date} onChange={F('start_date')} /></label><label>Target finish (optional)<input type="date" id="rt-p-finish" value={f.target_finish} onChange={F('target_finish')} /></label></div>
-        <label>Notes<textarea id="rt-p-notes" rows={3} value={f.notes} onChange={F('notes')} /></label>
-      </div>
-    </Drawer>
-  );
-}
-
-// ── Team screen ─────────────────────────────────────────────────────────────
-function Team({ store, db, setPanel, say }) {
-  const [showInactive, setShowInactive] = useState(false);
-  const discs = M.disciplinesOf(db, showInactive);
-  return (
-    <div className="rt-page">
-      <div className="rt-toolbar"><label className="check small"><input type="checkbox" id="rt-show-inactive" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} /> Show inactive people and disciplines</label><span className="grow" />
-        <button className="btn sm" onClick={() => setPanel({ kind: 'discipline', row: {} })}>+ Add Discipline</button></div>
-      <div className="rt-team">{discs.map((d, i) => {
-        const people = M.peopleOf(db, d.id, showInactive);
-        return <section key={d.id} className={`rt-dcard ${d.active ? '' : 'inactive'} ${d.kind === 'management' ? 'mgmt' : ''}`} aria-label={d.name}>
-          <header><h2>{d.name}{!d.active && <span className="muted"> · inactive</span>}</h2>
-            <span className="rt-dacts">
-              <button className="linkish small" aria-label={`Move ${d.name} up`} disabled={i === 0} onClick={() => say(store.moveDiscipline(d.id, -1), 'Order updated')}>↑</button>
-              <button className="linkish small" aria-label={`Move ${d.name} down`} disabled={i === discs.length - 1} onClick={() => say(store.moveDiscipline(d.id, 1), 'Order updated')}>↓</button>
-              <button className="linkish small" onClick={() => setPanel({ kind: 'discipline', row: d })}>Rename</button>
-              {d.active ? <button className="linkish small" onClick={() => say(store.setDisciplineActive(d.id, false), `${d.name} deactivated`)}>Deactivate</button> : <button className="linkish small" onClick={() => say(store.setDisciplineActive(d.id, true), `${d.name} reactivated`)}>Reactivate</button>}
-              {d.active && <button className="btn sm" onClick={() => setPanel({ kind: 'person', row: { discipline_id: d.id } })}>+ Add Person</button>}</span></header>
-          {people.length ? <ul className="rt-people">{people.map((p) => <li key={p.id} className={p.active ? '' : 'inactive'}>
-            <span className="rt-pn">{p.name}</span><span className="rt-role">{p.role || <span className="muted">—</span>}</span>
-            <span className="rt-cap">{p.weekly_capacity_hours == null ? <span className="muted">capacity not set</span> : `${fmtH(p.weekly_capacity_hours)} h`}</span>
-            <span className="rt-act">{p.active ? 'Active' : 'Inactive'}</span>
-            <span className="rt-pacts"><button className="linkish small" onClick={() => setPanel({ kind: 'person', row: p })}>Edit</button>{' · '}
-              {p.active ? <button className="linkish small" onClick={() => say(store.setPersonActive(p.id, false), `${p.name} deactivated — their tasks stay visible`)}>Deactivate</button> : <button className="linkish small" onClick={() => say(store.setPersonActive(p.id, true), `${p.name} reactivated`)}>Reactivate</button>}</span></li>)}</ul>
-            : <p className="muted small rt-none">No people yet.</p>}
-        </section>;
-      })}</div>
+  const save = () => { const { phase_key: _ph, ...rest } = f; if (say(store.saveProject({ ...rest, id: row.id }), 'Project saved')) close(); };
+  return <Drawer title={`Project · ${row.name}`} close={close} footer={<><button className="btn primary ix" id="rt-p-save" onClick={save}>Save</button><button className="btn ghost ix" onClick={close}>Cancel</button></>}>
+    <div className="rt-form">
+      <label>Project name<input type="text" id="rt-p-name" value={f.name} onChange={F('name')} /></label>
+      <div className="rt-2"><label>Status<input type="text" id="rt-p-status" value={f.status} onChange={F('status')} list="rt-pstat2" /></label><label>Project manager<input type="text" id="rt-p-pm" value={f.project_manager} onChange={F('project_manager')} /></label></div>
+      <datalist id="rt-pstat2"><option>Active</option><option>On Hold</option><option>Completed</option></datalist>
+      <div className="rt-2"><label>Start<input type="date" id="rt-p-start" value={f.start_date} onChange={F('start_date')} /></label><label>Target finish<input type="date" id="rt-p-finish" value={f.target_finish} onChange={F('target_finish')} /></label></div>
+      <label>Notes<textarea id="rt-p-notes" rows={3} value={f.notes} onChange={F('notes')} /></label>
     </div>
-  );
+  </Drawer>;
 }
-function PersonPanel({ store, db, row, close, say }) {
-  const isNew = !row.id;
-  const [f, setF] = useState(() => ({ name: '', role: '', weekly_capacity_hours: '', discipline_id: '', active: true, ...Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v ?? ''])) }));
-  const F = (k) => (e) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
-  const n = row.id ? db.rt_tasks.filter((t) => t.person_id === row.id).length : 0;
-  const save = () => { if (say(store.savePerson({ ...f, id: row.id }), isNew ? `${f.name.trim()} added` : 'Person saved')) close(); };
-  return (
-    <Drawer title={isNew ? 'Add person' : `Edit ${row.name}`} close={close} footer={<><button className="btn primary" id="rt-m-save" onClick={save}>Save</button><button className="btn" onClick={close}>Cancel</button></>}>
-      <div className="rt-form">
-        <label>Name<input id="rt-m-name" value={f.name} onChange={F('name')} /></label>
-        <label>Discipline<select id="rt-m-disc" value={f.discipline_id} onChange={F('discipline_id')}><option value="">Choose…</option>{M.disciplinesOf(db).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>
-        <label>Role<input id="rt-m-role" value={f.role} onChange={F('role')} placeholder="e.g. Architect" /></label>
-        <label>Weekly capacity (h)<input type="number" id="rt-m-cap" min="0" max="80" value={f.weekly_capacity_hours} onChange={F('weekly_capacity_hours')} placeholder="Blank = not set" /></label>
-        <label className="check"><input type="checkbox" id="rt-m-active" checked={!!f.active} onChange={F('active')} /> Active</label>
-        {!isNew && <p className="small muted">{n} task{n === 1 ? '' : 's'}. Deactivating removes {row.name} from new assignment lists; their tasks stay visible in the Planner.</p>}
-      </div>
-    </Drawer>
-  );
-}
-function DisciplinePanel({ store, row, close, say }) {
-  const [name, setName] = useState(row.name || '');
-  const save = () => { if (say(store.saveDiscipline({ id: row.id, name }), row.id ? 'Discipline renamed' : `Discipline "${name.trim()}" added`)) close(); };
-  return (
-    <Drawer title={row.id ? `Rename ${row.name}` : 'Add discipline'} close={close} footer={<><button className="btn primary" id="rt-d-save" onClick={save}>Save</button><button className="btn" onClick={close}>Cancel</button></>}>
-      <div className="rt-form"><label>Discipline name<input id="rt-d-name" value={name} onChange={(e) => setName(e.target.value)} /></label></div>
-    </Drawer>
-  );
+function PeopleTab({ store, db, say }) {
+  const [showInactive, setShowInactive] = useState(false); const [newDisc, setNewDisc] = useState(''); const [adds, setAdds] = useState({});
+  const discs = M.disciplinesOf(db, showInactive); const active = M.disciplinesOf(db);
+  const openCount = (pid) => db.rt_tasks.filter((t) => t.person_id === pid && t.active !== false && M.isActive(t)).length;
+  const sp = (p, patch, okText) => say(store.savePerson({ ...p, ...patch }), okText);
+  const addPerson = (d) => { const nm = (adds[d.id] || '').trim(); if (say(store.savePerson({ name: nm, discipline_id: d.id, active: true }), `Added ${nm}`)) setAdds({ ...adds, [d.id]: '' }); };
+  const addDisc = () => { if (say(store.saveDiscipline({ name: newDisc }), `Added ${newDisc.trim()}`)) setNewDisc(''); };
+  const pos = (d) => active.findIndex((x) => x.id === d.id);
+  return <>
+    <div className="settools"><label className="check"><input type="checkbox" id="rt-show-inactive" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} /> Show inactive people and disciplines</label></div>
+    <p className="small muted">Deactivating someone removes them from new assignments — their tasks stay.</p>
+    {discs.map((d) => {
+      const ps = M.peopleOf(db, d.id, showInactive);
+      return <section key={d.id} className={`dsec ${d.active ? '' : 'off'}`} data-disc={d.name}>
+        <header className="dsec-h">
+          <InlineText id={`dn-${d.id}`} label="Discipline name" value={d.name} onSave={(v) => say(store.saveDiscipline({ id: d.id, name: v }), 'Discipline renamed')} />
+          {!d.active && <span className="muted">inactive</span>}
+          <span className="dsec-acts">
+            <button className="btn ghost sm ix" aria-label={`Move ${d.name} up`} disabled={!d.active || pos(d) <= 0} onClick={() => say(store.moveDiscipline(d.id, -1))}>↑</button>
+            <button className="btn ghost sm ix" aria-label={`Move ${d.name} down`} disabled={!d.active || pos(d) === active.length - 1} onClick={() => say(store.moveDiscipline(d.id, 1))}>↓</button>
+            {d.active ? <button className="btn ghost sm ix" onClick={() => say(store.setDisciplineActive(d.id, false), `${d.name} deactivated`)}>Deactivate</button> : <button className="btn ghost sm ix" onClick={() => say(store.setDisciplineActive(d.id, true), `${d.name} reactivated`)}>Reactivate</button>}
+          </span>
+        </header>
+        <div className="setlist">{ps.map((p) => <div key={p.id} className={`setrow person ${p.active ? '' : 'off'}`} data-person={p.name}>
+          <div className="f"><label className="label" htmlFor={`en-${p.id}`}>Name</label><InlineText id={`en-${p.id}`} label="Name" value={p.name} onSave={(v) => sp(p, { name: v }, 'Saved')} /></div>
+          <div className="f"><label className="label" htmlFor={`et-${p.id}`}>Discipline</label><select id={`et-${p.id}`} value={p.discipline_id} onChange={(e) => sp(p, { discipline_id: e.target.value }, `${p.name} moved`)}>{active.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}{!d.active && <option value={d.id}>{d.name}</option>}</select></div>
+          <div className="f"><label className="label" htmlFor={`er-${p.id}`}>Role</label><InlineText id={`er-${p.id}`} label="Role" value={p.role || ''} placeholder="e.g. Architect" onSave={(v) => sp(p, { role: v }, 'Saved')} /></div>
+          <div className="f sw-f"><span className="label">Active</span><Switch on={p.active} label={`${p.name} active`} onChange={(v) => say(store.setPersonActive(p.id, v), v ? `${p.name} reactivated` : `${p.name} deactivated — their tasks stay`)} /><small className="muted">{openCount(p.id)} open</small></div>
+        </div>)}{!ps.length && <p className="muted small none">No people yet.</p>}</div>
+        {d.active && <div className="addline inline"><input type="text" id={`newPerson-${d.id}`} aria-label={`New person in ${d.name}`} placeholder={`Add a person to ${d.name}`} value={adds[d.id] || ''} onChange={(e) => setAdds({ ...adds, [d.id]: e.target.value })} onKeyDown={(e) => { if (e.key === 'Enter') addPerson(d); }} /><button className="btn ghost ix" data-addperson={d.name} onClick={() => addPerson(d)}>Add person</button></div>}
+      </section>;
+    })}
+    <div className="addline"><label className="label" htmlFor="newDisc">New discipline</label><div className="addrow" style={{ margin: 0 }}><input type="text" id="newDisc" placeholder="Discipline name" value={newDisc} onChange={(e) => setNewDisc(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') addDisc(); }} /><button className="btn primary ix" id="addDisc" onClick={addDisc}>Add discipline</button></div></div>
+  </>;
 }

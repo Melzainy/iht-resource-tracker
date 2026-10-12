@@ -13,7 +13,9 @@
     "build": "node scripts/build.mjs",
     "preview": "node scripts/build.mjs --preview",
     "check": "node scripts/rt-check.mjs",
-    "seed:sql": "node scripts/rt-seed-sql.mjs"
+    "seed:sql": "node scripts/rt-seed-sql.mjs",
+    "test:ui": "node tests/rt-ui-v2.cjs",
+    "test:live": "node tests/rt-live-two-browser.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.117.0",

@@ -1,8 +1,11 @@
-# Publishes the live Resource Tracker (dist/) to GitHub Pages. Manual trigger only.
+# Publishes the Resource Tracker preview (dist/) to GitHub Pages from the preview branch.
 # The site is public: anyone with the URL can open it. The data is protected only by the database rules (no login yet).
 name: Deploy Resource Tracker to GitHub Pages
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - preview/resource-tracker-v2
 permissions:
   contents: read
   pages: write

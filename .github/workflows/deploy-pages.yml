@@ -1,8 +1,11 @@
-# Publishes the live Resource Tracker (dist/) to GitHub Pages. Manual trigger only.
+# Temporary preview deploy: run from main, but build the reviewed redesign branch.
 # The site is public: anyone with the URL can open it. The data is protected only by the database rules (no login yet).
 name: Deploy Resource Tracker to GitHub Pages
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 permissions:
   contents: read
   pages: write
@@ -15,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: redesign/resource-tracker-v2
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -23,13 +28,10 @@ jobs:
       - run: npm run check
       - run: npm run build
         env:
-          # Resource Tracker live database. Repository → Settings → Secrets and variables → Actions → **Variables**
-          # (not Secrets: both values are public by design). Leave unset to build the local preview instead.
-          # The build refuses any secret / service_role key.
           RT_BACKEND: ${{ vars.RT_BACKEND }}
           RT_SUPABASE_URL: ${{ vars.RT_SUPABASE_URL }}
           RT_SUPABASE_PUBLISHABLE_KEY: ${{ vars.RT_SUPABASE_PUBLISHABLE_KEY }}
-          RT_REQUIRE_LIVE: "1" # never publish a local-data build
+          RT_REQUIRE_LIVE: "1"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

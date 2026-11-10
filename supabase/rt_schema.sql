@@ -120,3 +120,15 @@ do $$ declare t text; begin
       execute format('alter publication supabase_realtime add table public.%I', t);
     end if;
   end loop; end $$;
+
+-- Project current phase, also applied to existing installations.
+alter table public.rt_projects add column if not exists phase_key text
+check (phase_key is null or phase_key in (
+'phase-conceptual-design-contract',
+'phase-design-development-freeze',
+'phase-coordinated-design',
+'phase-permit-documentation',
+'phase-construction-docs-manufacturing-readiness',
+'phase-site-manufacturing-construction'
+));
+notify pgrst, 'reload schema';
